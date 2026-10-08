@@ -26,7 +26,12 @@ pub fn render_search_bar(model: &Model, frame: &mut Frame, area: Rect) {
         String::new()
     };
     let text = format!("/{query}{match_info}  Enter: next  Esc: clear");
-    let bar = Paragraph::new(text).style(Style::default().bg(Color::Blue).fg(Color::White));
+    // Fixed RGB colors keep the search input readable across ANSI palettes.
+    let bar = Paragraph::new(text).style(
+        Style::default()
+            .bg(Color::Rgb(30, 58, 95))
+            .fg(Color::Rgb(255, 255, 255)),
+    );
     frame.render_widget(bar, area);
 }
 
