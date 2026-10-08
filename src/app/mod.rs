@@ -8,6 +8,7 @@
 
 mod effects;
 mod event_loop;
+mod ime;
 mod input;
 mod model;
 mod update;

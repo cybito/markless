@@ -22,10 +22,20 @@ impl App {
         FileWatcher::new(path, Duration::from_millis(200))
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_message_side_effects(
         model: &mut Model,
         file_watcher: &mut Option<FileWatcher>,
         msg: &Message,
+    ) {
+        Self::handle_message_side_effects_with_ime(model, file_watcher, msg, None);
+    }
+
+    pub(super) fn handle_message_side_effects_with_ime(
+        model: &mut Model,
+        file_watcher: &mut Option<FileWatcher>,
+        msg: &Message,
+        ime: Option<&mut super::ime::Ime>,
     ) {
         match msg {
             Message::ToggleWatch => {
@@ -97,7 +107,7 @@ impl App {
                 if !model.can_edit() {
                     // Guard already handled in update(); skip side effects.
                 } else if let Some(cmd) = model.external_editor.clone() {
-                    Self::launch_external_editor(model, &cmd);
+                    Self::launch_external_editor(model, &cmd, ime);
                 } else {
                     Self::enter_builtin_editor(model);
                 }
@@ -434,7 +444,11 @@ impl App {
         model.editor_buffer = Some(buf);
     }
 
-    fn launch_external_editor(model: &mut Model, editor_cmd: &str) {
+    fn launch_external_editor(
+        model: &mut Model,
+        editor_cmd: &str,
+        mut ime: Option<&mut super::ime::Ime>,
+    ) {
         // Record the file hash before editing
         model.editor_disk_hash = model.file_disk_hash();
 
@@ -446,6 +460,11 @@ impl App {
             return;
         };
         let extra_args = tokens.get(1..).unwrap_or_default();
+
+        if let Some(reporter) = ime.as_deref_mut() {
+            reporter.stop();
+        }
+        let _ = execute!(stdout(), crossterm::event::DisableFocusChange);
 
         // Suspend TUI: disable mouse, leave alternate screen, disable raw mode
         let _ = set_mouse_motion_tracking(false);
@@ -465,6 +484,10 @@ impl App {
         if model.mouse_enabled {
             let _ = execute!(stdout(), EnableMouseCapture);
             let _ = set_mouse_motion_tracking(true);
+        }
+        let _ = execute!(stdout(), crossterm::event::EnableFocusChange);
+        if let Some(reporter) = ime {
+            reporter.resume();
         }
         model.needs_full_redraw = true;
 

@@ -133,6 +133,31 @@ Mouse
 - Hover link/image: show URL
 - Click + drag: select lines and copy
 
+## ImeKit integration (custom branch)
+
+This branch reports input intent to ImeKit through
+one persistent connection. Reading, navigation, help, and link selection report
+`command`; search and the built-in editor report `text`. Search stays in text
+mode after Enter, until Esc closes it. Text mode releases temporary English; it
+does not force a particular input method.
+
+On supported local interactive terminals, markless automatically connects to
+`~/.local/state/infra-as-code/ime-control/run/control.sock`. SSH and non-graphical
+sessions bypass direct integration. With `HERDR_IME_INTENT=1`, it instead reports
+to Herdr using `HERDR_ENV=1`, a trusted `HERDR_SOCKET_PATH`, and exactly one of
+`HERDR_PANE_ID` or `HERDR_IME_POPUP_TERMINAL_ID`. Invalid Herdr configuration never
+falls back to switching an input source on the server host.
+
+Focus loss and exit release the declaration. Before launching an external editor,
+markless suspends its declaration; after the editor returns, a real key or focus
+event resumes reporting the current mode. Run this customized binary directly;
+it obtains its own mode lease rather than relying on an `ime-guard` entry lease.
+
+IME support is optional. Connection, protocol, or service failures silently disable
+it for the rest of the process, while normal input and editor behavior continue.
+The application never switches the system input source itself. Herdr's `recorded`
+acknowledgment confirms recorded intent only, not a completed local source switch.
+
 ## License
 
 MIT

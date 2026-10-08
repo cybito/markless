@@ -272,6 +272,18 @@ impl App {
     }
 
     fn event_loop(terminal: &mut DefaultTerminal, model: &mut Model) -> Result<()> {
+        let mut ime = super::ime::Ime::new();
+        let result = Self::event_loop_with_ime(terminal, model, &mut ime);
+        ime.quit();
+        let _ = execute!(stdout(), crossterm::event::DisableFocusChange);
+        result
+    }
+
+    fn event_loop_with_ime(
+        terminal: &mut DefaultTerminal,
+        model: &mut Model,
+        ime: &mut super::ime::Ime,
+    ) -> Result<()> {
         // Drain stale bytes left in the input buffer by startup capability
         // queries (OSC 11 background query, Kitty/Sixel image-protocol probes).
         // When a terminal doesn't understand a probe it may echo the payload
@@ -281,6 +293,9 @@ impl App {
         if drained_startup > 0 {
             crate::perf::log_event("event.drain.startup", format!("drained={drained_startup}"));
         }
+
+        execute!(stdout(), crossterm::event::EnableFocusChange)?;
+        ime.focus_in(super::ime::text_mode(model));
 
         let start = Instant::now();
         let mut resize_debouncer = ResizeDebouncer::new(100);
@@ -373,7 +388,13 @@ impl App {
                     .is_some_and(FileWatcher::take_change_ready)
             {
                 *model = update(std::mem::take(model), Message::FileChanged);
-                Self::handle_message_side_effects(model, &mut file_watcher, &Message::FileChanged);
+                Self::handle_message_side_effects_with_ime(
+                    model,
+                    &mut file_watcher,
+                    &Message::FileChanged,
+                    Some(ime),
+                );
+                ime.sync(super::ime::text_mode(model));
                 needs_render = true;
             }
 
@@ -387,8 +408,12 @@ impl App {
             if event::poll(Duration::from_millis(poll_ms))? {
                 // Refresh timestamp after poll wait so debouncers use accurate times.
                 let event_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let msg =
-                    Self::handle_event(&event::read()?, model, event_ms, &mut resize_debouncer);
+                let incoming = event::read()?;
+                let msg = if super::ime::prepare_event(ime, &incoming, model) {
+                    Self::handle_event(&incoming, model, event_ms, &mut resize_debouncer)
+                } else {
+                    None
+                };
                 if let Some(msg) = msg {
                     crate::perf::log_event(
                         "event.message",
@@ -396,7 +421,13 @@ impl App {
                     );
                     let side_msg = msg.clone();
                     *model = update(std::mem::take(model), msg);
-                    Self::handle_message_side_effects(model, &mut file_watcher, &side_msg);
+                    Self::handle_message_side_effects_with_ime(
+                        model,
+                        &mut file_watcher,
+                        &side_msg,
+                        Some(ime),
+                    );
+                    ime.sync(super::ime::text_mode(model));
                     Self::update_browse_debouncer(
                         model,
                         &side_msg,
@@ -412,13 +443,23 @@ impl App {
                 let mut drained = 0_u32;
                 while event::poll(Duration::from_millis(5))? {
                     let drain_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    let msg =
-                        Self::handle_event(&event::read()?, model, drain_ms, &mut resize_debouncer);
+                    let incoming = event::read()?;
+                    let msg = if super::ime::prepare_event(ime, &incoming, model) {
+                        Self::handle_event(&incoming, model, drain_ms, &mut resize_debouncer)
+                    } else {
+                        None
+                    };
                     if let Some(msg) = msg {
                         drained += 1;
                         let side_msg = msg.clone();
                         *model = update(std::mem::take(model), msg);
-                        Self::handle_message_side_effects(model, &mut file_watcher, &side_msg);
+                        Self::handle_message_side_effects_with_ime(
+                            model,
+                            &mut file_watcher,
+                            &side_msg,
+                            Some(ime),
+                        );
+                        ime.sync(super::ime::text_mode(model));
                         Self::update_browse_debouncer(
                             model,
                             &side_msg,
