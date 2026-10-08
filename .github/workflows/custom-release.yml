@@ -1,0 +1,125 @@
+name: Custom release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+concurrency:
+  group: custom-release-${{ github.repository }}-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'cybito/markless'
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+      tag: ${{ steps.validate.outputs.tag }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch custom ancestry
+        run: git fetch --no-tags origin refs/heads/custom:refs/remotes/origin/custom
+      - id: validate
+        name: Validate event and dereferenced source
+        run: |
+          python3 - <<'PYVALIDATE'
+          import json, os, pathlib, re, subprocess, tomllib
+          event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          release = event['release']; tag = release['tag_name']
+          assert event['repository']['full_name'] == 'cybito/markless'
+          assert event['action'] == 'published' and not release['draft'] and not release['prerelease']
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*', tag)
+          run = lambda *args: subprocess.check_output(args, text=True).strip()
+          sha = run('git', 'rev-parse', tag + '^{commit}')
+          assert sha == run('git', 'rev-parse', 'HEAD')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'origin/custom'], check=True)
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          assert tag == 'v' + version
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'commit={sha}\ntag={tag}\nversion={version}\n')
+          PYVALIDATE
+      - name: Check packaging script syntax
+        run: python3 -m py_compile .github/scripts/package-release.py
+  build:
+    needs: validate
+    permissions:
+      contents: write
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin
+            runner: macos-26
+          - platform: linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    concurrency:
+      group: custom-package-${{ github.repository }}-${{ needs.validate.outputs.tag }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      SOURCE_SHA: ${{ needs.validate.outputs.commit }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: existing
+        name: Verify existing immutable assets before building
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/package-release.py check --tag "$RELEASE_TAG" --commit "$SOURCE_SHA" --platform "$PLATFORM" --output-dir "$RUNNER_TEMP/existing" > "$RUNNER_TEMP/check.json"
+          python3 - <<'PY'
+          import json, os
+          result = json.load(open(os.environ['RUNNER_TEMP'] + '/check.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('exists=' + str(result['exists']).lower() + '\n')
+          if result['exists']:
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write('Reused verified assets: ' + ', '.join('`' + name + '`' for name in result['assets']) + '\n')
+          PY
+      - name: Build and smoke native binary
+        if: steps.existing.outputs.exists == 'false'
+        run: bash .github/scripts/custom-release.sh build "$PLATFORM" "$RELEASE_TAG" "$SOURCE_SHA" "$RUNNER_TEMP/build"
+      - name: Package binary and installer
+        if: steps.existing.outputs.exists == 'false'
+        run: python3 .github/scripts/package-release.py pack --tag "$RELEASE_TAG" --commit "$SOURCE_SHA" --platform "$PLATFORM" --input-dir "$RUNNER_TEMP/build" --output-dir "$RUNNER_TEMP/package"
+      - name: Publish immutable assets and download back for verification
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/package-release.py publish --directory "$RUNNER_TEMP/package" > "$RUNNER_TEMP/published.json"
+      - name: Report published assets
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          python3 - <<'PY'
+          import json, os
+          result = json.load(open(os.environ['RUNNER_TEMP'] + '/published.json'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('Published and verified: ' + ', '.join('`' + name + '`' for name in result['assets']) + '\n')
+          PY
+  summarize:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      SOURCE_SHA: ${{ needs.validate.outputs.commit }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify both assets and preserve user release notes
+        run: gh release view "$RELEASE_TAG" --repo cybito/markless --json assets --jq '.assets[].name'
