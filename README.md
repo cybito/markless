@@ -28,7 +28,7 @@ Markless is a terminal markdown viewer and editor with image support. It is focu
 - Anchor and footnote navigation within documents
 - File watching for live reload
 - Link hover and click (including image placeholders and rendered diagrams)
-- Line selection with mouse drag and copy (pbcopy on macOS, OSC 52 fallback)
+- Text selection with mouse drag and copy (pbcopy on macOS, OSC 52 fallback)
 - Opens image files directly (png, jpg, gif, webp, svg, avif, and more)
 - Auto theme detection via OSC 11 terminal query
 - Fast scrolling with stable layout and reflow on resize
@@ -89,7 +89,7 @@ Navigation
 - `j` / `k` or arrows: scroll
 - `Space` / `PageDown`: page down
 - `b` / `PageUp`: page up
-- `Ctrl-d` / `Ctrl-u`: half page
+- `d` / `u`: half page
 - `g` / `G`: top / bottom
 
 Search
@@ -131,7 +131,11 @@ Mouse
 - Scroll wheel: scroll
 - Click links or images: open
 - Hover link/image: show URL
-- Click + drag: select lines and copy
+- Click + drag: select text and copy on release
+- Shift + click: copy the entire displayed line
+- Alt + click: copy the paragraph between displayed blank lines
+
+文本选区按终端显示的 grapheme 边界复制；十六进制段落复制包含尚未缓存的行，不受滚动位置影响。
 
 ## ImeKit integration (custom branch)
 

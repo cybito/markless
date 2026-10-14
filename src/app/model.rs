@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use image::DynamicImage;
 use ratatui_image::picker::{Picker, ProtocolType};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::ImageMode;
 use ratatui_image::protocol::StatefulProtocol;
@@ -59,11 +61,35 @@ pub enum SelectionState {
     Finalized,
 }
 
+/// A text boundary measured in terminal columns, not UTF-8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextPosition {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyScope {
+    Line,
+    Paragraph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    Lines,
+    Text {
+        anchor_column: usize,
+        active_column: usize,
+    },
+    Click(CopyScope),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineSelection {
     pub anchor: usize,
     pub active: usize,
     pub state: SelectionState,
+    pub mode: SelectionMode,
 }
 
 pub struct Model {
@@ -127,7 +153,7 @@ pub struct Model {
     image_scroll_cooldown_ticks: u8,
     /// Forced image rendering mode (overrides auto-detection)
     pub image_mode: Option<ImageMode>,
-    /// Current line selection state (mouse drag)
+    /// Current text selection or modified-click copy gesture
     pub selection: Option<LineSelection>,
     /// Whether inline images are enabled
     pub images_enabled: bool,
@@ -648,7 +674,7 @@ impl Model {
             self.toc_scroll_offset = self.toc_scroll_offset.min(self.max_toc_scroll_offset());
             let allow_short = self.search_allow_short;
             refresh_search_matches(self, false, allow_short);
-            self.clamp_selection();
+            self.clear_selection();
         }
     }
 
@@ -768,7 +794,7 @@ impl Model {
         self.toc_scroll_offset = self.toc_scroll_offset.min(self.max_toc_scroll_offset());
         let allow_short = self.search_allow_short;
         refresh_search_matches(self, false, allow_short);
-        self.clamp_selection();
+        self.clear_selection();
         Ok(())
     }
 
@@ -909,7 +935,7 @@ impl Model {
         self.toc_scroll_offset = self.toc_scroll_offset.min(self.max_toc_scroll_offset());
         let allow_short = self.search_allow_short;
         refresh_search_matches(self, false, allow_short);
-        self.clamp_selection();
+        self.clear_selection();
         if self.toc_visible && !self.toc_focused {
             self.sync_toc_to_viewport();
         }
@@ -930,6 +956,16 @@ impl Model {
 
     pub fn selected_text(&self) -> Option<(String, usize)> {
         let range = self.selection_range()?;
+        if matches!(self.selection?.mode, SelectionMode::Text { .. }) {
+            let mut lines = Vec::new();
+            for idx in range {
+                let text = self.visible_line_text(idx);
+                let bytes = self.selection_bytes(idx)?;
+                lines.push(text[bytes].to_string());
+            }
+            let count = lines.len();
+            return Some((lines.join("\n"), count));
+        }
         let mut lines = Vec::new();
         for idx in range {
             // Code block body lines: copy the original source, not the
@@ -948,6 +984,8 @@ impl Model {
                 if let Some(text) = clean_selected_line(line, &link_refs) {
                     lines.push(text);
                 }
+            } else if let Some(text) = self.document.hex_line_content(idx) {
+                lines.push(text);
             }
         }
         if lines.is_empty() {
@@ -955,6 +993,95 @@ impl Model {
         }
         let count = lines.len();
         Some((lines.join("\n"), count))
+    }
+
+    /// Text as rendered, including inline labels and code frame decoration.
+    pub fn visible_line_text(&self, line: usize) -> String {
+        let mut text = if let Some(line) = self.document.line_at(line) {
+            line.spans().map_or_else(
+                || line.content().to_string(),
+                |spans| {
+                    spans
+                        .iter()
+                        .map(crate::document::InlineSpan::text)
+                        .collect::<String>()
+                },
+            )
+        } else {
+            // Uncached hex rows still contain text and are not paragraph breaks.
+            self.document.hex_line_content(line).unwrap_or_default()
+        };
+        text.truncate(column_boundary(&text, self.max_doc_width() as usize).0);
+        text
+    }
+
+    /// Byte range in rendered text, shared by copying and selection highlighting.
+    pub fn selection_bytes(&self, line: usize) -> Option<std::ops::Range<usize>> {
+        let selection = self.selection?;
+        if matches!(selection.mode, SelectionMode::Click(_))
+            || !self.selection_range()?.contains(&line)
+        {
+            return None;
+        }
+        let text = self.visible_line_text(line);
+        let SelectionMode::Text {
+            anchor_column,
+            active_column,
+        } = selection.mode
+        else {
+            return (selection.state != SelectionState::Pending).then_some(0..text.len());
+        };
+        let anchor = TextPosition {
+            line: selection.anchor,
+            column: anchor_column,
+        };
+        let active = TextPosition {
+            line: selection.active,
+            column: active_column,
+        };
+        let (start, end) = if anchor <= active {
+            (anchor, active)
+        } else {
+            (active, anchor)
+        };
+        let start_byte = if line == start.line {
+            column_boundary(&text, start.column).0
+        } else {
+            0
+        };
+        let end_byte = if line == end.line {
+            column_boundary(&text, end.column).0
+        } else {
+            text.len()
+        };
+        Some(start_byte..end_byte)
+    }
+
+    /// Normalize mouse coordinates to complete grapheme boundaries.
+    pub fn text_position(&self, line: usize, column: usize) -> TextPosition {
+        let text = self.visible_line_text(line);
+        let (_, column) = column_boundary(&text, column);
+        TextPosition { line, column }
+    }
+
+    pub fn paragraph_range(&self, line: usize) -> Option<std::ops::RangeInclusive<usize>> {
+        let count = self.document.line_count();
+        if line >= count || self.line_is_blank(line) {
+            return None;
+        }
+        let mut start = line;
+        let mut end = line;
+        while start > 0 && !self.line_is_blank(start - 1) {
+            start -= 1;
+        }
+        while end + 1 < count && !self.line_is_blank(end + 1) {
+            end += 1;
+        }
+        Some(start..=end)
+    }
+
+    fn line_is_blank(&self, line: usize) -> bool {
+        self.visible_line_text(line).trim().is_empty()
     }
 
     pub fn selection_dragging(&self) -> bool {
@@ -965,24 +1092,6 @@ impl Model {
 
     pub const fn clear_selection(&mut self) {
         self.selection = None;
-    }
-
-    fn clamp_selection(&mut self) {
-        let Some(selection) = self.selection else {
-            return;
-        };
-        let line_count = self.document.line_count();
-        if line_count == 0 {
-            self.selection = None;
-            return;
-        }
-        let max = line_count.saturating_sub(1);
-        let clamped = LineSelection {
-            anchor: selection.anchor.min(max),
-            active: selection.active.min(max),
-            state: selection.state,
-        };
-        self.selection = Some(clamped);
     }
 }
 
@@ -1045,6 +1154,19 @@ fn clean_selected_line(
         return Some(out);
     }
     Some(content.to_string())
+}
+
+/// Return the byte offset and terminal column of a complete grapheme boundary.
+fn column_boundary(text: &str, column: usize) -> (usize, usize) {
+    let mut width = 0;
+    for (byte, grapheme) in text.grapheme_indices(true) {
+        let next = width + UnicodeWidthStr::width(grapheme);
+        if next > column {
+            return (byte, width);
+        }
+        width = next;
+    }
+    (text.len(), width)
 }
 
 pub(super) fn is_markdown_ext(name: &str) -> bool {

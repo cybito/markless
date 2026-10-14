@@ -2307,6 +2307,7 @@ dependencies = [
  "typst",
  "typst-assets",
  "typst-svg",
+ "unicode-segmentation",
  "unicode-width",
  "unicodeit",
 ]

@@ -96,7 +96,7 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     all_lines.push(Line::raw("  j/k or Up/Down      Scroll"));
     all_lines.push(Line::raw("  Space/PageDown      Page down"));
     all_lines.push(Line::raw("  b/PageUp            Page up"));
-    all_lines.push(Line::raw("  Ctrl-d / Ctrl-u     Half page"));
+    all_lines.push(Line::raw("  d / u               Half page"));
     all_lines.push(Line::raw("  g / G               Top / bottom"));
     all_lines.push(Line::raw(""));
 
@@ -143,7 +143,11 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     all_lines.push(Line::raw("  o                   Open visible links (1-9)"));
     all_lines.push(Line::raw("  q / Ctrl-c / Ctrl-q Quit"));
     all_lines.push(Line::raw("  ? / F1              Toggle help"));
-    all_lines.push(Line::raw("  Mouse drag          Select lines + copy"));
+    all_lines.push(Line::raw("  Mouse drag          Select text + copy"));
+    all_lines.push(Line::raw("  Shift + click       Copy whole line"));
+    all_lines.push(Line::raw(
+        "  Alt + click         Copy paragraph (between blank lines)",
+    ));
     all_lines.push(Line::raw(""));
 
     // Config

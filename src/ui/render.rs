@@ -240,15 +240,12 @@ fn render_document(model: &mut Model, frame: &mut Frame, area: Rect) {
     let visible_lines = model
         .document
         .visible_lines(model.viewport.offset(), model.viewport.height() as usize);
-    let selection = model.selection_range();
 
     // Build text content
     let mut content: Vec<Line> = Vec::new();
     for (idx, line) in visible_lines.iter().enumerate() {
         let line_idx = model.viewport.offset() + idx;
-        let selected = selection
-            .as_ref()
-            .is_some_and(|range| range.contains(&line_idx));
+        let selection = model.selection_bytes(line_idx);
         let line_style = super::style::style_for_line_type(line.line_type());
         if let Some(spans) = line.spans() {
             let mut styled_spans = spans
@@ -267,8 +264,8 @@ fn render_document(model: &mut Model, frame: &mut Frame, area: Rect) {
             {
                 styled_spans = highlight_spans(&styled_spans, query);
             }
-            if selected {
-                styled_spans = apply_selection_bg(styled_spans, Color::DarkGray);
+            if let Some(range) = selection {
+                styled_spans = apply_selection_bg(styled_spans, range, Color::DarkGray);
             }
             content.push(Line::from(styled_spans));
         } else {
@@ -280,8 +277,8 @@ fn render_document(model: &mut Model, frame: &mut Frame, area: Rect) {
             {
                 styled_spans = highlight_spans(&styled_spans, query);
             }
-            if selected {
-                styled_spans = apply_selection_bg(styled_spans, Color::DarkGray);
+            if let Some(range) = selection {
+                styled_spans = apply_selection_bg(styled_spans, range, Color::DarkGray);
             }
             content.push(Line::from(styled_spans));
         }
@@ -493,15 +490,32 @@ fn highlight_spans(spans: &[Span<'_>], query: &str) -> Vec<Span<'static>> {
     out
 }
 
-fn apply_selection_bg(spans: Vec<Span<'static>>, bg: Color) -> Vec<Span<'static>> {
-    spans
-        .into_iter()
-        .map(|span| {
-            let mut style = span.style;
-            if style.bg.is_none() || style.bg == Some(Color::Reset) {
-                style = style.bg(bg);
-            }
-            Span::styled(span.content.to_string(), style)
-        })
-        .collect()
+fn apply_selection_bg(
+    spans: Vec<Span<'static>>,
+    range: std::ops::Range<usize>,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for span in spans {
+        let text = span.content;
+        let start = range.start.saturating_sub(offset).min(text.len());
+        let end = range.end.saturating_sub(offset).min(text.len());
+        offset += text.len();
+        if start >= end {
+            out.push(Span::styled(text, span.style));
+            continue;
+        }
+        if start > 0 {
+            out.push(Span::styled(text[..start].to_string(), span.style));
+        }
+        out.push(Span::styled(
+            text[start..end].to_string(),
+            span.style.bg(bg),
+        ));
+        if end < text.len() {
+            out.push(Span::styled(text[end..].to_string(), span.style));
+        }
+    }
+    out
 }

@@ -13,7 +13,7 @@ mod input;
 mod model;
 mod update;
 
-pub use model::{Model, ToastLevel};
+pub use model::{CopyScope, Model, TextPosition, ToastLevel};
 pub use update::{Message, update};
 
 use std::path::PathBuf;

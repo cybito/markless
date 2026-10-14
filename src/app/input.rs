@@ -5,7 +5,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Message, Model};
+use super::model::SelectionMode;
+use crate::app::{App, CopyScope, Message, Model};
 use crate::editor::Direction;
 
 use super::event_loop::ResizeDebouncer;
@@ -101,35 +102,64 @@ impl App {
         let doc_area = document_mouse_area(model);
         let in_doc = point_in_rect(mouse.column, mouse.row, doc_area);
 
+        let text_position = |line| {
+            let col = mouse.column.clamp(doc_area.x, doc_area.x + doc_area.width);
+            let column = col.saturating_sub(doc_area.x + crate::ui::DOCUMENT_LEFT_PADDING) as usize;
+            model.text_position(line, column)
+        };
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if in_doc && let Some(line) = doc_line_for_row(model, doc_area, mouse.row, false) {
-                    return Some(Message::StartSelection(line));
+                    if mouse.modifiers.contains(KeyModifiers::ALT) {
+                        return Some(Message::StartCopySelection(line, CopyScope::Paragraph));
+                    }
+                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        return Some(Message::StartCopySelection(line, CopyScope::Line));
+                    }
+                    return Some(Message::StartTextSelection(text_position(line)));
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if model.selection.is_some()
-                    && let Some(line) = doc_line_for_row(model, doc_area, mouse.row, true)
-                {
-                    return Some(Message::UpdateSelection(line));
+                if let Some(selection) = model.selection {
+                    if matches!(selection.mode, SelectionMode::Click(_)) {
+                        return Some(Message::CancelCopySelection);
+                    }
+                    if let Some(line) = doc_line_for_row(model, doc_area, mouse.row, true) {
+                        return Some(Message::UpdateTextSelection(text_position(line)));
+                    }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) if model.selection.is_some() => {
+                let selection = model.selection.unwrap();
+                if matches!(selection.mode, SelectionMode::Click(_)) {
+                    return if in_doc {
+                        doc_line_for_row(model, doc_area, mouse.row, false)
+                            .map(Message::FinishCopySelection)
+                            .or(Some(Message::ClearSelection))
+                    } else {
+                        Some(Message::ClearSelection)
+                    };
+                }
                 if let Some(line) = doc_line_for_row(model, doc_area, mouse.row, true) {
-                    if model.selection_dragging() {
-                        return Some(Message::EndSelection(line));
+                    let position = text_position(line);
+                    let changed = matches!(selection.mode,
+                        SelectionMode::Text { anchor_column, .. }
+                        if selection.anchor != position.line || anchor_column != position.column);
+                    if model.selection_dragging() || changed {
+                        return Some(Message::EndTextSelection(position));
                     }
-                    let content_col = mouse
-                        .column
-                        .saturating_sub(doc_area.x + crate::ui::DOCUMENT_LEFT_PADDING)
-                        as usize;
-                    if Self::link_at_column(model, line, content_col).is_some() {
-                        return Some(Message::FollowLinkAtLine(line, Some(content_col)));
+                    if in_doc {
+                        let content_col = mouse
+                            .column
+                            .saturating_sub(doc_area.x + crate::ui::DOCUMENT_LEFT_PADDING)
+                            as usize;
+                        if Self::link_at_column(model, line, content_col).is_some() {
+                            return Some(Message::FollowLinkAtLine(line, Some(content_col)));
+                        }
+                        if image_at_line(model, line) {
+                            return Some(Message::FollowLinkAtLine(line, None));
+                        }
                     }
-                    if image_at_line(model, line) {
-                        return Some(Message::FollowLinkAtLine(line, None));
-                    }
-                    return Some(Message::ClearSelection);
                 }
                 return Some(Message::ClearSelection);
             }
@@ -309,16 +339,10 @@ impl App {
             KeyCode::Char('b') | KeyCode::PageUp if model.viewport.can_scroll_up() => {
                 return Some(Message::PageUp);
             }
-            KeyCode::Char('d')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && model.viewport.can_scroll_down() =>
-            {
+            KeyCode::Char('d') if key.modifiers.is_empty() && model.viewport.can_scroll_down() => {
                 return Some(Message::HalfPageDown);
             }
-            KeyCode::Char('u')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && model.viewport.can_scroll_up() =>
-            {
+            KeyCode::Char('u') if key.modifiers.is_empty() && model.viewport.can_scroll_up() => {
                 return Some(Message::HalfPageUp);
             }
             KeyCode::Char('g') | KeyCode::Home => return Some(Message::GoToTop),
@@ -525,6 +549,9 @@ fn doc_line_for_row(model: &Model, doc_area: Rect, row: u16, clamp: bool) -> Opt
     let mut line = model.viewport.offset() + rel_row;
     let max_line = model.document.line_count().saturating_sub(1);
     if line > max_line {
+        if !clamp {
+            return None;
+        }
         line = max_line;
     }
     Some(line)

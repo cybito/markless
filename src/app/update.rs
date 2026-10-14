@@ -1,5 +1,5 @@
 use crate::app::Model;
-use crate::app::model::{LineSelection, SelectionState};
+use crate::app::model::{CopyScope, LineSelection, SelectionMode, SelectionState, TextPosition};
 use crate::editor::Direction;
 
 /// All possible events and actions in the application.
@@ -98,6 +98,14 @@ pub enum Message {
     UpdateSelection(usize),
     /// Finish a line selection (mouse up)
     EndSelection(usize),
+    /// Start, extend or finish a character selection.
+    StartTextSelection(TextPosition),
+    UpdateTextSelection(TextPosition),
+    EndTextSelection(TextPosition),
+    /// Begin a modified-click copy; drags cancel this gesture.
+    StartCopySelection(usize, CopyScope),
+    CancelCopySelection,
+    FinishCopySelection(usize),
     /// Clear current selection
     ClearSelection,
 
@@ -307,6 +315,7 @@ pub fn update(mut model: Model, msg: Message) -> Model {
             model.watch_enabled = !model.watch_enabled;
         }
         Message::ToggleHelp => {
+            model.clear_selection();
             model.help_visible = !model.help_visible;
             model.help_scroll_offset = 0;
         }
@@ -331,6 +340,7 @@ pub fn update(mut model: Model, msg: Message) -> Model {
 
         // Search
         Message::StartSearch => {
+            model.clear_selection();
             model.search_query = Some(String::new());
             model.search_matches.clear();
             model.search_match_index = None;
@@ -397,6 +407,7 @@ pub fn update(mut model: Model, msg: Message) -> Model {
                 anchor: line,
                 active: line,
                 state: SelectionState::Pending,
+                mode: SelectionMode::Lines,
             });
         }
         Message::UpdateSelection(line) => {
@@ -405,6 +416,7 @@ pub fn update(mut model: Model, msg: Message) -> Model {
                     anchor: selection.anchor,
                     active: line,
                     state: SelectionState::Dragging,
+                    mode: selection.mode,
                 });
             }
         }
@@ -414,7 +426,65 @@ pub fn update(mut model: Model, msg: Message) -> Model {
                     anchor: selection.anchor,
                     active: line,
                     state: SelectionState::Finalized,
+                    mode: selection.mode,
                 });
+            }
+        }
+        Message::StartTextSelection(position) => {
+            model.selection = Some(LineSelection {
+                anchor: position.line,
+                active: position.line,
+                state: SelectionState::Pending,
+                mode: SelectionMode::Text {
+                    anchor_column: position.column,
+                    active_column: position.column,
+                },
+            });
+        }
+        Message::UpdateTextSelection(position) | Message::EndTextSelection(position) => {
+            if let Some(selection) = model.selection.as_mut()
+                && let SelectionMode::Text { active_column, .. } = &mut selection.mode
+            {
+                selection.active = position.line;
+                *active_column = position.column;
+                selection.state = if matches!(msg, Message::EndTextSelection(_)) {
+                    SelectionState::Finalized
+                } else {
+                    SelectionState::Dragging
+                };
+            }
+        }
+        Message::StartCopySelection(line, scope) => {
+            model.selection = Some(LineSelection {
+                anchor: line,
+                active: line,
+                state: SelectionState::Pending,
+                mode: SelectionMode::Click(scope),
+            });
+        }
+        Message::CancelCopySelection => {
+            if let Some(selection) = model.selection.as_mut() {
+                selection.state = SelectionState::Dragging;
+            }
+        }
+        Message::FinishCopySelection(line) => {
+            if let Some(selection) = model.selection
+                && selection.state == SelectionState::Pending
+                && selection.anchor == line
+                && let SelectionMode::Click(scope) = selection.mode
+            {
+                let range = match scope {
+                    CopyScope::Line => Some(line..=line),
+                    CopyScope::Paragraph => model.paragraph_range(line),
+                };
+                model.selection = range.map(|range| LineSelection {
+                    anchor: *range.start(),
+                    active: *range.end(),
+                    state: SelectionState::Finalized,
+                    mode: SelectionMode::Lines,
+                });
+            } else {
+                model.clear_selection();
             }
         }
         Message::ClearSelection => {
@@ -423,6 +493,7 @@ pub fn update(mut model: Model, msg: Message) -> Model {
 
         // Editor
         Message::EnterEditMode => {
+            model.clear_selection();
             if !model.can_edit() {
                 let reason = if model.document.is_hex_mode() {
                     "Cannot edit binary files".to_string()
@@ -591,6 +662,7 @@ pub fn update(mut model: Model, msg: Message) -> Model {
         }
         // Window
         Message::Resize(width, height) => {
+            model.clear_selection();
             model.viewport.resize(width, height.saturating_sub(1));
             model.reflow_layout();
         }

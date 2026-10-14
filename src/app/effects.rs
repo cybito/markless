@@ -93,7 +93,9 @@ impl App {
             Message::SelectVisibleLink(index) => {
                 Self::follow_link_picker_index(model, *index);
             }
-            Message::EndSelection(_) => {
+            Message::EndSelection(_)
+            | Message::EndTextSelection(_)
+            | Message::FinishCopySelection(_) => {
                 Self::copy_selection(model);
                 model.clear_selection();
             }

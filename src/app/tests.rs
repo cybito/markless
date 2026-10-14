@@ -1844,7 +1844,12 @@ fn test_mouse_click_on_footnote_superscript_emits_follow() {
         modifiers: KeyModifiers::NONE,
     };
     let msg = App::handle_mouse(down, &model);
-    assert_eq!(msg, Some(Message::StartSelection(link_line)));
+    assert_eq!(
+        msg,
+        Some(Message::StartTextSelection(
+            model.text_position(link_line, col_chars)
+        ))
+    );
     model = update(model, msg.unwrap());
 
     // Mouse Up at same position
@@ -3846,4 +3851,478 @@ fn test_enter_edit_mode_allowed_for_text_file() {
     let model = create_test_model();
     let model = update(model, Message::EnterEditMode);
     assert!(model.editor_mode, "should enter edit mode for text files");
+}
+
+fn selection_model(text: &str) -> Model {
+    Model::new(
+        PathBuf::from("test.txt"),
+        Document::from_plain_text(text),
+        (80, 24),
+    )
+}
+
+fn select_text(mut model: Model, anchor: (usize, usize), active: (usize, usize)) -> Model {
+    let anchor = model.text_position(anchor.0, anchor.1);
+    let active = model.text_position(active.0, active.1);
+    model = update(model, Message::StartTextSelection(anchor));
+    model = update(model, Message::UpdateTextSelection(active));
+    update(model, Message::EndTextSelection(active))
+}
+
+fn document_mouse(
+    model: &Model,
+    kind: MouseEventKind,
+    line: u16,
+    column: u16,
+    modifiers: KeyModifiers,
+) -> MouseEvent {
+    let x = if model.toc_visible {
+        crate::ui::split_main_columns(Rect::new(0, 0, model.viewport.width(), 24))[1].x
+    } else {
+        0
+    };
+    MouseEvent {
+        kind,
+        column: x + crate::ui::DOCUMENT_LEFT_PADDING + column,
+        row: line,
+        modifiers,
+    }
+}
+
+fn apply_mouse(model: Model, mouse: MouseEvent) -> Model {
+    let msg = App::handle_mouse(mouse, &model).expect("mouse message");
+    update(model, msg)
+}
+
+#[test]
+fn test_text_selection_same_line_and_reverse() {
+    for (anchor, active) in [((0, 2), (0, 5)), ((0, 5), (0, 2))] {
+        let model = select_text(selection_model("abcdefgh"), anchor, active);
+        assert_eq!(model.selected_text(), Some(("cde".into(), 1)));
+        assert_eq!(model.selection_bytes(0), Some(2..5));
+    }
+}
+
+#[test]
+fn test_text_selection_cross_line_preserves_blank_lines_and_reverse() {
+    for (anchor, active) in [((0, 2), (3, 3)), ((3, 3), (0, 2))] {
+        let model = select_text(
+            selection_model("abcdef\n\nmiddle\nlast line"),
+            anchor,
+            active,
+        );
+        assert_eq!(
+            model.selected_text(),
+            Some(("cdef\n\nmiddle\nlas".into(), 4))
+        );
+    }
+}
+
+#[test]
+fn test_text_selection_snaps_wide_and_combining_graphemes() {
+    let model = select_text(selection_model("A中e\u{301}文Z"), (0, 2), (0, 6));
+    assert_eq!(model.selected_text(), Some(("中e\u{301}文".into(), 1)));
+    let model = select_text(selection_model("x👩‍💻y"), (0, 2), (0, 3));
+    assert_eq!(model.selected_text(), Some(("👩‍💻".into(), 1)));
+}
+
+#[test]
+fn test_text_selection_uses_rendered_columns_for_lam_alef() {
+    for (anchor, active) in [((0, 2), (0, 3)), ((0, 3), (0, 2))] {
+        let model = select_text(selection_model("لاX"), anchor, active);
+        assert_eq!(model.selected_text(), Some(("X".into(), 1)));
+    }
+}
+
+#[test]
+fn test_text_selection_copies_visible_link_label_across_styles() {
+    let doc =
+        Document::parse_with_layout("Before [**label**](https://example.test) after", 80).unwrap();
+    let model = Model::new(PathBuf::from("test.md"), doc, (80, 24));
+    let line = (0..model.document.line_count())
+        .find(|&i| model.visible_line_text(i).contains("label"))
+        .unwrap();
+    let model = select_text(model, (line, 9), (line, 12));
+    assert_eq!(model.selected_text(), Some(("bel".into(), 1)));
+}
+
+#[test]
+fn test_text_selection_copies_only_visible_columns() {
+    let mut model = selection_model("abcdefghij\nklmnopqrst");
+    model.viewport.resize(8, 23); // two columns of left padding
+    let model = select_text(model, (0, 2), (1, 99));
+    assert_eq!(model.selected_text(), Some(("cdef\nklmnop".into(), 2)));
+}
+
+#[test]
+fn test_mouse_drag_selects_columns_with_toc_and_scroll_offset() {
+    let mut model = selection_model("zero\none\ntwo\nabcdef\nfour");
+    model.toc_visible = true;
+    model.viewport.resize(80, 3);
+    model.viewport.go_to_line(2);
+    let down = document_mouse(
+        &model,
+        MouseEventKind::Down(MouseButton::Left),
+        1,
+        2,
+        KeyModifiers::NONE,
+    );
+    let model = apply_mouse(model, down);
+    assert_eq!(model.selection_bytes(3), Some(2..2));
+    let drag = document_mouse(
+        &model,
+        MouseEventKind::Drag(MouseButton::Left),
+        1,
+        5,
+        KeyModifiers::NONE,
+    );
+    let model = apply_mouse(model, drag);
+    let up = document_mouse(
+        &model,
+        MouseEventKind::Up(MouseButton::Left),
+        1,
+        5,
+        KeyModifiers::NONE,
+    );
+    let msg = App::handle_mouse(up, &model).unwrap();
+    assert!(matches!(msg, Message::EndTextSelection(_)));
+    let model = update(model, msg);
+    assert_eq!(model.selected_text(), Some(("cde".into(), 1)));
+}
+
+#[test]
+fn test_plain_click_does_not_copy_and_link_drag_does_not_open() {
+    let model = selection_model("abcdef");
+    let down = document_mouse(
+        &model,
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        2,
+        KeyModifiers::NONE,
+    );
+    let model = apply_mouse(model, down);
+    let up = document_mouse(
+        &model,
+        MouseEventKind::Up(MouseButton::Left),
+        0,
+        2,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(App::handle_mouse(up, &model), Some(Message::ClearSelection));
+
+    let doc = Document::parse_with_layout("[label](https://example.test)", 80).unwrap();
+    let model = Model::new(PathBuf::from("test.md"), doc, (80, 24));
+    let down = document_mouse(
+        &model,
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        0,
+        KeyModifiers::NONE,
+    );
+    let model = apply_mouse(model, down);
+    let drag = document_mouse(
+        &model,
+        MouseEventKind::Drag(MouseButton::Left),
+        0,
+        3,
+        KeyModifiers::NONE,
+    );
+    let model = apply_mouse(model, drag);
+    let up = document_mouse(
+        &model,
+        MouseEventKind::Up(MouseButton::Left),
+        0,
+        3,
+        KeyModifiers::NONE,
+    );
+    assert!(matches!(
+        App::handle_mouse(up, &model),
+        Some(Message::EndTextSelection(_))
+    ));
+}
+
+#[test]
+fn test_modified_click_copies_line_or_paragraph_and_overrides_links() {
+    let doc = Document::parse_with_layout("[label](https://example.test)\nnext", 80).unwrap();
+    for (modifiers, scope) in [
+        (KeyModifiers::SHIFT, super::CopyScope::Line),
+        (KeyModifiers::ALT, super::CopyScope::Paragraph),
+        (
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+            super::CopyScope::Paragraph,
+        ),
+    ] {
+        let model = Model::new(PathBuf::from("test.md"), doc.clone(), (80, 24));
+        let down = document_mouse(
+            &model,
+            MouseEventKind::Down(MouseButton::Left),
+            0,
+            1,
+            modifiers,
+        );
+        assert_eq!(
+            App::handle_mouse(down, &model),
+            Some(Message::StartCopySelection(0, scope))
+        );
+        let model = apply_mouse(model, down);
+        assert_eq!(model.selection_bytes(0), None);
+        let up = document_mouse(
+            &model,
+            MouseEventKind::Up(MouseButton::Left),
+            0,
+            1,
+            KeyModifiers::NONE,
+        );
+        let msg = App::handle_mouse(up, &model).unwrap();
+        assert_eq!(msg, Message::FinishCopySelection(0));
+        let model = update(model, msg);
+        assert!(
+            model
+                .selected_text()
+                .unwrap()
+                .0
+                .starts_with("https://example.test")
+        );
+    }
+}
+
+#[test]
+fn test_paragraph_copy_uses_display_blank_boundaries_and_document_edges() {
+    for (line, expected) in [
+        (0, "first\nsecond"),
+        (1, "first\nsecond"),
+        (4, "third\nfourth"),
+        (5, "third\nfourth"),
+    ] {
+        let model = selection_model("first\nsecond\n\n   \nthird\nfourth");
+        let model = update(
+            model,
+            Message::StartCopySelection(line, super::CopyScope::Paragraph),
+        );
+        let model = update(model, Message::FinishCopySelection(line));
+        assert_eq!(model.selected_text().unwrap().0, expected);
+    }
+    for line in [2, 3] {
+        let model = update(
+            selection_model("first\nsecond\n\n   \nthird"),
+            Message::StartCopySelection(line, super::CopyScope::Paragraph),
+        );
+        let model = update(model, Message::FinishCopySelection(line));
+        assert!(model.selection.is_none());
+    }
+}
+
+#[test]
+fn test_paragraph_copy_includes_wrapped_display_lines() {
+    let doc = Document::parse_with_layout("one two three four five six seven eight\n\nother", 12)
+        .unwrap();
+    let model = Model::new(PathBuf::from("test.md"), doc, (80, 24));
+    let range = model.paragraph_range(1).unwrap();
+    assert_eq!(*range.start(), 0);
+    assert!(*range.end() >= 2);
+    let expected = range
+        .map(|i| model.visible_line_text(i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let model = update(
+        model,
+        Message::StartCopySelection(1, super::CopyScope::Paragraph),
+    );
+    let model = update(model, Message::FinishCopySelection(1));
+    assert_eq!(model.selected_text().unwrap().0, expected);
+}
+
+#[test]
+fn test_modified_click_drag_is_cancelled() {
+    let model = selection_model("abcdef");
+    let down = document_mouse(
+        &model,
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        1,
+        KeyModifiers::SHIFT,
+    );
+    let model = apply_mouse(model, down);
+    let drag = document_mouse(
+        &model,
+        MouseEventKind::Drag(MouseButton::Left),
+        0,
+        3,
+        KeyModifiers::SHIFT,
+    );
+    let model = apply_mouse(model, drag);
+    assert_eq!(model.selection_bytes(0), None);
+    let up = document_mouse(
+        &model,
+        MouseEventKind::Up(MouseButton::Left),
+        0,
+        3,
+        KeyModifiers::SHIFT,
+    );
+    let model = apply_mouse(model, up);
+    assert!(model.selection.is_none());
+}
+
+#[test]
+fn test_selection_clamps_drag_outside_document_and_ignores_empty_rows() {
+    let model = selection_model("abcdef\nghijkl");
+    let down = document_mouse(
+        &model,
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        2,
+        KeyModifiers::NONE,
+    );
+    let model = apply_mouse(model, down);
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 100,
+        row: 100,
+        modifiers: KeyModifiers::NONE,
+    };
+    let model = apply_mouse(model, drag);
+    assert_eq!(model.selected_text().unwrap().0, "cdef\nghijkl");
+    let empty = document_mouse(
+        &selection_model("abcdef"),
+        MouseEventKind::Down(MouseButton::Left),
+        5,
+        0,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(App::handle_mouse(empty, &selection_model("abcdef")), None);
+}
+
+#[test]
+fn test_selection_cancelled_on_resize_reflow_reload_and_file_switch() {
+    let model = select_text(selection_model("abcdef"), (0, 1), (0, 3));
+    let model = update(model, Message::Resize(60, 20));
+    assert!(model.selection.is_none());
+    let mut model = select_text(selection_model("abcdef"), (0, 1), (0, 3));
+    model.reflow_layout();
+    assert!(model.selection.is_none());
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.txt");
+    std::fs::write(&path, "abcdef").unwrap();
+    let mut model = select_text(selection_model("abcdef"), (0, 1), (0, 3));
+    model.file_path = path.clone();
+    model.reload_from_disk().unwrap();
+    assert!(model.selection.is_none());
+    let mut model = select_text(selection_model("abcdef"), (0, 1), (0, 3));
+    model.load_file(&path).unwrap();
+    assert!(model.selection.is_none());
+}
+
+#[test]
+fn test_half_page_keys_and_mode_precedence() {
+    let text = (0..100)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for toc_focused in [false, true] {
+        let mut model = selection_model(&text);
+        model.toc_visible = toc_focused;
+        model.toc_focused = toc_focused;
+        model.viewport.go_to_line(30);
+        for (key, expected) in [('d', Message::HalfPageDown), ('u', Message::HalfPageUp)] {
+            assert_eq!(
+                App::handle_key(
+                    event::KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    &model
+                ),
+                Some(expected)
+            );
+            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                assert_eq!(
+                    App::handle_key(event::KeyEvent::new(KeyCode::Char(key), modifiers), &model),
+                    None
+                );
+            }
+            model.search_query = Some("query".into());
+            assert_eq!(
+                App::handle_key(
+                    event::KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    &model
+                ),
+                Some(Message::SearchInput(format!("query{key}")))
+            );
+            model.search_query = None;
+            model.editor_mode = true;
+            assert_eq!(
+                App::handle_key(
+                    event::KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    &model
+                ),
+                Some(Message::EditorInsertChar(key))
+            );
+            model.editor_mode = false;
+        }
+    }
+}
+
+#[test]
+fn test_modified_copy_keeps_raw_code_and_paragraph_removes_frames() {
+    let raw = "abcdefghij".repeat(20);
+    let md = format!("```rust\n{raw}\nsecond\n```\n\nother");
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let model = Model::new(PathBuf::from("test.md"), doc, (80, 24));
+    let body = (0..model.document.line_count())
+        .find(|&i| model.document.code_block_raw_line(i).is_some())
+        .unwrap();
+    let mut line_model = update(
+        model,
+        Message::StartCopySelection(body, super::CopyScope::Line),
+    );
+    line_model = update(line_model, Message::FinishCopySelection(body));
+    assert_eq!(line_model.selected_text().unwrap().0, raw);
+    let model = update(
+        line_model,
+        Message::StartCopySelection(body, super::CopyScope::Paragraph),
+    );
+    let model = update(model, Message::FinishCopySelection(body));
+    assert_eq!(model.selected_text().unwrap().0, format!("{raw}\nsecond"));
+    let model = select_text(model, (body, 4), (body, 7));
+    assert_eq!(model.selected_text().unwrap().0, "cde");
+}
+
+#[test]
+fn test_empty_text_selection_effect_clears_selection_without_copying() {
+    let mut model = select_text(selection_model("abcdef"), (0, 2), (0, 2));
+    let end = Message::EndTextSelection(model.text_position(0, 2));
+    let mut watcher = None;
+    App::handle_message_side_effects(&mut model, &mut watcher, &end);
+    assert!(model.selection.is_none());
+    assert!(model.active_toast().is_none());
+    App::handle_message_side_effects(&mut model, &mut watcher, &end);
+    assert!(model.active_toast().is_none());
+}
+
+#[test]
+fn test_hex_paragraph_copy_is_independent_of_viewport_cache() {
+    let expected = (0..1000)
+        .map(|line| {
+            format!(
+                "{:08x}  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41 |AAAAAAAAAAAAAAAA|",
+                line * 16
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut model = Model::new(
+        PathBuf::from("test.bin"),
+        Document::from_hex("test.bin", vec![65; 16000]),
+        (80, 24),
+    );
+    for offset in [0, 500] {
+        model.viewport.go_to_line(offset);
+        model.ensure_hex_overscan();
+        let line = offset.max(4);
+        model = update(
+            model,
+            Message::StartCopySelection(line, super::CopyScope::Paragraph),
+        );
+        model = update(model, Message::FinishCopySelection(line));
+        let (text, count) = model.selected_text().unwrap();
+        assert_eq!(count, 1000);
+        assert_eq!(text, expected);
+    }
 }
