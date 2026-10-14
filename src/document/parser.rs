@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::ops::Range;
 
 use anyhow::Result;
 use comrak::nodes::{AstNode, NodeValue, TableAlignment};
@@ -257,7 +258,7 @@ fn parse_with_all_options_internal<S: BuildHasher>(
     let root = parse_document(&arena, source, &options);
 
     let wrap_width = wrap_width.max(1) as usize;
-    let code_block_max_width = (max_width.max(1) as usize).max(wrap_width);
+    let block_max_width = (max_width.max(1) as usize).max(wrap_width);
     let mut ctx = ParseContext {
         lines: Vec::new(),
         headings: Vec::new(),
@@ -269,7 +270,7 @@ fn parse_with_all_options_internal<S: BuildHasher>(
         math_sources: HashMap::new(),
         image_heights,
         wrap_width,
-        code_block_max_width,
+        block_max_width,
         mermaid_as_images: opts.mermaid_as_images,
         failed_mermaid_srcs: opts.failed_mermaid_srcs,
         math_as_images: opts.math_as_images,
@@ -332,7 +333,8 @@ struct ParseContext<'h, S: BuildHasher = std::collections::hash_map::RandomState
     math_sources: HashMap<String, String>,
     image_heights: &'h HashMap<String, usize, S>,
     wrap_width: usize,
-    code_block_max_width: usize,
+    /// Upper bound for non-prose blocks (code blocks, tables): the full document area, ignoring --wrap-width.
+    block_max_width: usize,
     mermaid_as_images: bool,
     failed_mermaid_srcs: &'h HashSet<String>,
     math_as_images: bool,
@@ -561,7 +563,7 @@ fn process_node<'a, S: BuildHasher>(
 
             // Render CSV code blocks as tables instead of code blocks
             if language == Some("csv") {
-                let csv_lines = render_csv_as_table(&literal);
+                let csv_lines = render_csv_as_table(&literal, ctx.block_max_width);
                 if !csv_lines.is_empty() {
                     ctx.lines.extend(csv_lines);
                     ctx.lines
@@ -785,7 +787,12 @@ fn process_node<'a, S: BuildHasher>(
         NodeValue::Table(_) => {
             let base_line = ctx.lines.len();
             let link_start = ctx.link_refs.len();
-            let table_lines = render_table(node, &mut ctx.link_refs, &mut ctx.images);
+            let table_lines = render_table(
+                node,
+                &mut ctx.link_refs,
+                &mut ctx.images,
+                ctx.block_max_width,
+            );
             ctx.lines.extend(table_lines);
             // Fix up link lines relative to where the table was placed
             for link in &mut ctx.link_refs[link_start..] {
@@ -960,7 +967,7 @@ fn emit_code_block<S: BuildHasher>(
         .map(UnicodeWidthStr::width)
         .max()
         .unwrap_or(0)
-        .min(ctx.code_block_max_width.saturating_sub(2).max(1));
+        .min(ctx.block_max_width.saturating_sub(2).max(1));
     let title = language.unwrap_or("code");
     let label = format!(" {title} ");
     let frame_inner_width = content_width + 2 + CODE_RIGHT_PADDING;
@@ -1342,61 +1349,43 @@ fn render_table<'a>(
     table_node: &'a AstNode<'a>,
     link_refs: &mut Vec<LinkRef>,
     images: &mut Vec<ImageRef>,
+    max_width: usize,
 ) -> Vec<RenderedLine> {
     let CollectedTableRows {
         alignments,
-        mut rows,
+        rows,
         has_header,
-        row_link_indices: row_links,
+        cell_link_ranges,
     } = collect_table_rows(table_node, link_refs, images);
-    if rows.is_empty() {
-        return Vec::new();
-    }
+    let layout = render_table_rows(&rows, &alignments, has_header, max_width);
 
-    let num_cols = rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
-    if num_cols == 0 {
-        return Vec::new();
-    }
-
-    for row in &mut rows {
-        while row.len() < num_cols {
-            row.push(TableCellRender {
-                text: String::new(),
-                spans: Vec::new(),
-            });
+    for ((row_cells, line_range), row_links) in layout
+        .cell_lines
+        .iter()
+        .zip(&layout.row_line_ranges)
+        .zip(cell_link_ranges)
+    {
+        for (cell_lines, link_range) in row_cells.iter().zip(row_links) {
+            let cell_links = &mut link_refs[link_range];
+            // Fallback when the link text cannot be located in the wrapped cell.
+            for link in cell_links.iter_mut() {
+                link.line = line_range.start;
+            }
+            // Match against undecorated cell text; padding and separators
+            // would otherwise interrupt labels wrapped across physical lines.
+            let extra = fixup_link_lines(cell_links, cell_lines, line_range.start, 0);
+            link_refs.extend(extra);
         }
     }
-
-    let mut col_widths = vec![1_usize; num_cols];
-    for row in &rows {
-        for (idx, cell) in row.iter().enumerate() {
-            col_widths[idx] = col_widths[idx].max(display_width(&cell.text));
-        }
-    }
-
-    let mid = render_table_inner_divider(&col_widths);
-
-    let mut lines = Vec::new();
-    for (idx, row) in rows.iter().enumerate() {
-        let output_line = lines.len();
-        lines.push(render_table_row(row, &col_widths, &alignments));
-        // Assign the correct output line to links collected from this row
-        for link_idx in &row_links[idx] {
-            link_refs[*link_idx].line = output_line;
-        }
-        if has_header && idx == 0 {
-            lines.push(RenderedLine::new(mid.clone(), LineType::Table));
-        }
-    }
-    lines
+    layout.lines
 }
 
 struct CollectedTableRows {
     alignments: Vec<TableAlignment>,
     rows: Vec<Vec<TableCellRender>>,
     has_header: bool,
-    /// For each row, the indices into `link_refs` that belong to that row.
-    row_link_indices: Vec<Vec<usize>>,
+    /// For each row and cell, the contiguous range of `link_refs` it owns.
+    cell_link_ranges: Vec<Vec<Range<usize>>>,
 }
 
 fn collect_table_rows<'a>(
@@ -1411,7 +1400,7 @@ fn collect_table_rows<'a>(
 
     let mut rows = Vec::new();
     let mut has_header = false;
-    let mut row_links: Vec<Vec<usize>> = Vec::new();
+    let mut cell_link_ranges = Vec::new();
     for row_node in table_node.children() {
         let is_header_row = matches!(row_node.data.borrow().value, NodeValue::TableRow(true));
         if is_header_row {
@@ -1422,7 +1411,7 @@ fn collect_table_rows<'a>(
         }
 
         let mut row_cells = Vec::new();
-        let mut this_row_link_indices = Vec::new();
+        let mut row_link_ranges = Vec::new();
         for cell_node in row_node.children() {
             if !matches!(cell_node.data.borrow().value, NodeValue::TableCell) {
                 continue;
@@ -1432,21 +1421,236 @@ fn collect_table_rows<'a>(
             // Collect links from this cell; line will be fixed up later
             let link_start = link_refs.len();
             collect_inline_elements(cell_node, 0, images, link_refs);
-            for idx in link_start..link_refs.len() {
-                this_row_link_indices.push(idx);
-            }
+            row_link_ranges.push(link_start..link_refs.len());
             row_cells.push(TableCellRender { text, spans });
         }
         rows.push(row_cells);
-        row_links.push(this_row_link_indices);
+        cell_link_ranges.push(row_link_ranges);
     }
 
     CollectedTableRows {
         alignments,
         rows,
         has_header,
-        row_link_indices: row_links,
+        cell_link_ranges,
     }
+}
+
+struct TableLayout {
+    lines: Vec<RenderedLine>,
+    /// For each source row, the range of `lines` it occupies (header divider excluded).
+    row_line_ranges: Vec<Range<usize>>,
+    /// For each source row and cell, its undecorated wrapped lines.
+    cell_lines: Vec<Vec<Vec<RenderedLine>>>,
+}
+
+/// Lay out table rows within `max_width`, wrapping cells onto multiple
+/// physical lines when the natural column widths do not fit. Missing
+/// trailing cells and alignments render as empty, left-aligned cells.
+fn render_table_rows(
+    rows: &[Vec<TableCellRender>],
+    alignments: &[TableAlignment],
+    has_header: bool,
+    max_width: usize,
+) -> TableLayout {
+    let num_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if num_cols == 0 {
+        return TableLayout {
+            lines: Vec::new(),
+            row_line_ranges: Vec::new(),
+            cell_lines: Vec::new(),
+        };
+    }
+
+    let mut natural = vec![1_usize; num_cols];
+    let mut minimum = vec![1_usize; num_cols];
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            natural[idx] = natural[idx].max(display_width(&cell.text));
+            minimum[idx] = cell
+                .text
+                .chars()
+                .filter_map(UnicodeWidthChar::width)
+                .fold(minimum[idx], usize::max);
+        }
+    }
+    let widths = allocate_column_widths(&natural, &minimum, max_width);
+
+    let mut lines = Vec::new();
+    let mut row_line_ranges = Vec::with_capacity(rows.len());
+    let mut cell_lines = Vec::with_capacity(rows.len());
+    for (row_idx, row) in rows.iter().enumerate() {
+        let wrapped: Vec<Vec<Vec<InlineSpan>>> = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, &width)| wrap_cell_spans(&cell.spans, width))
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        let start = lines.len();
+        for line_idx in 0..height {
+            let cell_lines: Vec<&[InlineSpan]> = wrapped
+                .iter()
+                .map(|cell| cell.get(line_idx).map_or(&[][..], Vec::as_slice))
+                .collect();
+            lines.push(render_table_line(&cell_lines, &widths, alignments));
+        }
+        row_line_ranges.push(start..lines.len());
+        cell_lines.push(
+            wrapped
+                .iter()
+                .map(|cell| {
+                    cell.iter()
+                        .map(|line| RenderedLine::new(spans_to_string(line), LineType::Table))
+                        .collect()
+                })
+                .collect(),
+        );
+        if has_header && row_idx == 0 {
+            lines.push(RenderedLine::new(
+                render_table_inner_divider(&widths),
+                LineType::Table,
+            ));
+        }
+    }
+
+    TableLayout {
+        lines,
+        row_line_ranges,
+        cell_lines,
+    }
+}
+
+/// Fit column widths into `max_width` (including the 2-column padding per
+/// cell and the 1-column separator between cells). Each column first gets
+/// its widest character; spare width then goes to columns below natural
+/// width, with small deficits filled first and large ones shared proportionally.
+/// If even the minimums do not fit, return them and let the viewport clip.
+fn allocate_column_widths(natural: &[usize], minimum: &[usize], max_width: usize) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let overhead = 3 * n - 1;
+    if natural.iter().sum::<usize>() + overhead <= max_width {
+        return natural.to_vec();
+    }
+    let mut widths: Vec<usize> = minimum
+        .iter()
+        .zip(natural)
+        .map(|(&min, &nat)| min.max(1).min(nat.max(1)))
+        .collect();
+    let reserved: usize = widths.iter().sum();
+    let Some(mut remaining) = max_width
+        .checked_sub(overhead)
+        .and_then(|available| available.checked_sub(reserved))
+    else {
+        return widths;
+    };
+
+    let deficits: Vec<usize> = natural
+        .iter()
+        .zip(&widths)
+        .map(|(&nat, &width)| nat.saturating_sub(width))
+        .collect();
+    let mut fixed: Vec<bool> = deficits.iter().map(|&deficit| deficit == 0).collect();
+    let mut open = fixed.iter().filter(|&&is_fixed| !is_fixed).count();
+    while open > 0 {
+        let fair = remaining / open;
+        let mut changed = false;
+        for idx in 0..n {
+            if !fixed[idx] && deficits[idx] <= fair {
+                widths[idx] += deficits[idx];
+                fixed[idx] = true;
+                remaining -= deficits[idx];
+                open -= 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if open == 0 {
+        return widths;
+    }
+
+    // Every open column has a deficit above the fair share, so the sum is non-zero.
+    let open_deficit: usize = (0..n)
+        .filter(|&idx| !fixed[idx])
+        .map(|idx| deficits[idx])
+        .sum();
+    let mut assigned = 0_usize;
+    for idx in 0..n {
+        if !fixed[idx] {
+            let share = remaining.saturating_mul(deficits[idx]) / open_deficit;
+            widths[idx] += share;
+            assigned += share;
+        }
+    }
+    let mut leftover = remaining - assigned;
+    for idx in 0..n {
+        if leftover == 0 {
+            break;
+        }
+        if !fixed[idx] && widths[idx] < natural[idx] {
+            widths[idx] += 1;
+            leftover -= 1;
+        }
+    }
+    widths
+}
+
+/// Wrap a table cell's spans to `width`, hard-splitting words that are
+/// still wider than the column. Always returns at least one (possibly empty) line.
+fn wrap_cell_spans(spans: &[InlineSpan], width: usize) -> Vec<Vec<InlineSpan>> {
+    let mut out = Vec::new();
+    for mut line in wrap_spans(spans, width, "", "") {
+        while line
+            .last()
+            .is_some_and(|span| span.text().chars().all(char::is_whitespace))
+        {
+            line.pop();
+        }
+        if display_width(&spans_to_string(&line)) > width {
+            out.extend(split_spans_to_width(&line, width));
+        } else {
+            out.push(line);
+        }
+    }
+    if out.is_empty() {
+        out.push(Vec::new());
+    }
+    out
+}
+
+/// Split spans at character boundaries so each line is at most `width`
+/// columns wide (a single character wider than `width` gets its own line).
+fn split_spans_to_width(spans: &[InlineSpan], width: usize) -> Vec<Vec<InlineSpan>> {
+    let mut lines = Vec::new();
+    let mut current: Vec<InlineSpan> = Vec::new();
+    let mut buf = String::new();
+    let mut used = 0_usize;
+    for span in spans {
+        for ch in span.text().chars() {
+            let w = ch.width().unwrap_or(0);
+            if used + w > width && used > 0 {
+                if !buf.is_empty() {
+                    current.push(InlineSpan::new(std::mem::take(&mut buf), span.style()));
+                }
+                lines.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            buf.push(ch);
+            used += w;
+        }
+        if !buf.is_empty() {
+            current.push(InlineSpan::new(std::mem::take(&mut buf), span.style()));
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn render_table_inner_divider(widths: &[usize]) -> String {
@@ -1460,20 +1664,17 @@ fn render_table_inner_divider(widths: &[usize]) -> String {
     out
 }
 
-fn render_table_row(
-    cells: &[TableCellRender],
+fn render_table_line(
+    cell_lines: &[&[InlineSpan]],
     widths: &[usize],
     alignments: &[TableAlignment],
 ) -> RenderedLine {
     let mut spans = Vec::new();
-    for idx in 0..widths.len() {
-        let cell = cells.get(idx).cloned().unwrap_or(TableCellRender {
-            text: String::new(),
-            spans: Vec::new(),
-        });
-        let mut content_spans = truncate_spans_by_display_width(&cell.spans, widths[idx]);
+    for (idx, &width) in widths.iter().enumerate() {
+        let cell = cell_lines.get(idx).copied().unwrap_or_default();
+        let mut content_spans = truncate_spans_by_display_width(cell, width);
         let content_width = display_width(&spans_to_string(&content_spans));
-        let padding = widths[idx].saturating_sub(content_width);
+        let padding = width.saturating_sub(content_width);
 
         spans.push(InlineSpan::new(" ".to_string(), InlineStyle::default()));
         match alignments.get(idx).copied().unwrap_or(TableAlignment::None) {
@@ -1503,7 +1704,7 @@ fn render_table_row(
 
 /// Render CSV content as table lines, reusing the existing table rendering infrastructure.
 /// All rows are rendered; the TUI viewport handles paging/scrolling.
-fn render_csv_as_table(csv_content: &str) -> Vec<RenderedLine> {
+fn render_csv_as_table(csv_content: &str, max_width: usize) -> Vec<RenderedLine> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -1525,47 +1726,8 @@ fn render_csv_as_table(csv_content: &str) -> Vec<RenderedLine> {
         }
     }
 
-    if rows.is_empty() {
-        return Vec::new();
-    }
-
-    let num_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-    if num_cols == 0 {
-        return Vec::new();
-    }
-
-    // Pad rows to have equal column counts
-    for row in &mut rows {
-        while row.len() < num_cols {
-            row.push(TableCellRender {
-                text: String::new(),
-                spans: Vec::new(),
-            });
-        }
-    }
-
-    // Calculate column widths
-    let mut col_widths = vec![1_usize; num_cols];
-    for row in &rows {
-        for (idx, cell) in row.iter().enumerate() {
-            col_widths[idx] = col_widths[idx].max(display_width(&cell.text));
-        }
-    }
-
-    // All columns left-aligned (CSV has no alignment info)
-    let alignments = vec![comrak::nodes::TableAlignment::None; num_cols];
-    let mid = render_table_inner_divider(&col_widths);
-
-    let mut lines = Vec::new();
-    for (idx, row) in rows.iter().enumerate() {
-        lines.push(render_table_row(row, &col_widths, &alignments));
-        // First row is treated as header
-        if idx == 0 {
-            lines.push(RenderedLine::new(mid.clone(), LineType::Table));
-        }
-    }
-
-    lines
+    // CSV has no alignment info (all columns left-aligned); the first row is the header.
+    render_table_rows(&rows, &[], true, max_width).lines
 }
 
 fn display_width(text: &str) -> usize {
@@ -1837,8 +1999,25 @@ fn collect_inline_spans_recursive<'a>(
             let text = crate::math::latex_to_unicode(&math.literal);
             spans.push(InlineSpan::new(text, math_style));
         }
-        NodeValue::SoftBreak | NodeValue::LineBreak => {
-            spans.push(InlineSpan::new(" ".to_string(), style));
+        NodeValue::LineBreak => {
+            spans.push(InlineSpan::new(HARD_BREAK.to_string(), style));
+        }
+        NodeValue::SoftBreak => {
+            // CommonMark joins soft breaks with a space; Chinese and Japanese
+            // have no inter-word spaces, so join breaks between them directly.
+            let prev = node
+                .previous_sibling()
+                .and_then(|sibling| extract_text(sibling).chars().next_back());
+            let next = node
+                .next_sibling()
+                .and_then(|sibling| extract_text(sibling).chars().next());
+            let joins_cjk = matches!(
+                (prev, next),
+                (Some(a), Some(b)) if joins_without_space(a) && joins_without_space(b)
+            );
+            if !joins_cjk {
+                spans.push(InlineSpan::new(" ".to_string(), style));
+            }
         }
         _ => {
             for child in node.children() {
@@ -1905,6 +2084,10 @@ fn extract_text_recursive<'a>(node: &'a AstNode<'a>, text: &mut String) {
     }
 }
 
+/// Span emitted for a hard line break. Text, Code and Math nodes never
+/// produce `\n`, so a span with exactly this text only comes from `LineBreak`.
+const HARD_BREAK: &str = "\n";
+
 fn wrap_spans(
     spans: &[InlineSpan],
     width: usize,
@@ -1913,13 +2096,15 @@ fn wrap_spans(
 ) -> Vec<Vec<InlineSpan>> {
     let mut tokens: Vec<InlineSpan> = Vec::new();
     for span in spans {
-        tokens.extend(split_inline_tokens(span));
+        tokens.extend(split_wrap_tokens(span));
     }
 
     let mut lines: Vec<Vec<InlineSpan>> = Vec::new();
     let mut current: Vec<InlineSpan> = Vec::new();
     let mut current_len = 0usize;
     let mut has_word = false;
+    // A whitespace token can wrap before the next content token arrives.
+    let mut pending_soft_wrap = false;
 
     let start_new_line = |prefix: &str,
                           current: &mut Vec<InlineSpan>,
@@ -1938,12 +2123,21 @@ fn wrap_spans(
     start_new_line(prefix_first, &mut current, &mut current_len, &mut has_word);
 
     for token in tokens {
+        if token.text() == HARD_BREAK {
+            if !pending_soft_wrap {
+                lines.push(std::mem::take(&mut current));
+            }
+            start_new_line(prefix_next, &mut current, &mut current_len, &mut has_word);
+            pending_soft_wrap = false;
+            continue;
+        }
         let token_len = UnicodeWidthStr::width(token.text());
         let token_is_ws = token.text().chars().all(char::is_whitespace);
 
         if current_len + token_len > width && has_word {
             lines.push(current.clone());
             start_new_line(prefix_next, &mut current, &mut current_len, &mut has_word);
+            pending_soft_wrap = true;
         }
 
         if token_is_ws && !has_word {
@@ -1952,6 +2146,7 @@ fn wrap_spans(
         }
 
         current_len += token_len;
+        pending_soft_wrap = false;
         current.push(token);
         has_word = token_is_ws || has_word;
         if !token_is_ws {
@@ -2030,6 +2225,75 @@ fn split_inline_tokens(span: &InlineSpan) -> Vec<InlineSpan> {
     out
 }
 
+/// Characters that must not begin a line (closing punctuation).
+const NO_LINE_START: &[char] = &[
+    '，', '。', '、', '；', '：', '！', '？', '）', '」', '』', '】', '》', '〉', '〕', '］', '｝',
+    '”', '’', '…', ',', '.', ';', ':', '!', '?', ')', ']', '}', '%',
+];
+
+/// Characters that must not end a line (opening punctuation).
+const NO_LINE_END: &[char] = &[
+    '（', '「', '『', '【', '《', '〈', '〔', '［', '｛', '“', '‘', '(', '[', '{',
+];
+
+/// Whether `ch` belongs to a CJK script (Hangul, CJK punctuation/ideographs,
+/// kana, Bopomofo, fullwidth forms), where a line may break between characters.
+const fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x11FF
+            | 0x2E80..=0x2FDF
+            | 0x3000..=0x303F
+            | 0x3040..=0x30FF
+            | 0x3100..=0x312F
+            | 0x3130..=0x318F
+            | 0x31F0..=0x31FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
+            | 0xFF00..=0xFFEF
+            | 0x20000..=0x2FFFF
+    )
+}
+
+/// Whether a soft break next to `ch` needs no space: CJK except Hangul,
+/// because Korean separates words with spaces.
+const fn joins_without_space(ch: char) -> bool {
+    is_cjk_char(ch) && !matches!(ch as u32, 0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF)
+}
+
+/// Split a span into wrap candidates: like `split_inline_tokens`, plus
+/// break opportunities between adjacent characters when either is CJK
+/// (respecting line-start/line-end punctuation rules). Only for
+/// `wrap_spans`; `normalize_inline_whitespace` must keep whole words.
+fn split_wrap_tokens(span: &InlineSpan) -> Vec<InlineSpan> {
+    let mut out = Vec::new();
+    for token in split_inline_tokens(span) {
+        if !token.text().chars().any(is_cjk_char) {
+            out.push(token);
+            continue;
+        }
+        let mut buf = String::new();
+        let mut prev: Option<char> = None;
+        for ch in token.text().chars() {
+            if let Some(a) = prev
+                && (is_cjk_char(a) || is_cjk_char(ch))
+                && !NO_LINE_START.contains(&ch)
+                && !NO_LINE_END.contains(&a)
+            {
+                out.push(InlineSpan::new(std::mem::take(&mut buf), span.style()));
+            }
+            buf.push(ch);
+            prev = Some(ch);
+        }
+        if !buf.is_empty() {
+            out.push(InlineSpan::new(buf, span.style()));
+        }
+    }
+    out
+}
+
 fn spans_to_string(spans: &[InlineSpan]) -> String {
     let mut content = String::new();
     for span in spans {
@@ -2098,7 +2362,7 @@ fn collect_paragraph_images_recursive<'a>(
 ///
 /// `prefix_len` is the byte length of the line prefix (e.g. blockquote
 /// marker, list indent) that should be stripped before cross-line
-/// concatenation.  All wrapped lines share the same prefix length.
+/// matching.  All wrapped lines share the same prefix length.
 fn fixup_link_lines(
     links: &mut [LinkRef],
     wrapped_lines: &[RenderedLine],
@@ -2110,26 +2374,8 @@ fn fixup_link_lines(
     // match a distinct occurrence in the rendered output.
     let mut claimed: Vec<(usize, usize)> = Vec::new();
     let mut extra: Vec<LinkRef> = Vec::new();
-
-    // Pre-build concatenation for the cross-line search (second pass).
-    // Strip the line prefix and trailing whitespace so the text flows
-    // continuously, then join with a single space.
-    let (concat, line_ranges) = if wrapped_lines.len() >= 2 {
-        let mut c = String::new();
-        let mut lr = Vec::new();
-        for (i, line) in wrapped_lines.iter().enumerate() {
-            let start = c.len();
-            let stripped = line.content().get(prefix_len..).unwrap_or("").trim_end();
-            c.push_str(stripped);
-            lr.push((start, c.len()));
-            if i + 1 < wrapped_lines.len() {
-                c.push(' ');
-            }
-        }
-        (c, lr)
-    } else {
-        (String::new(), Vec::new())
-    };
+    // Built on first use: most links fit on a single line.
+    let mut compact: Option<CompactLines> = None;
 
     for link in links.iter_mut() {
         if link.text.is_empty() {
@@ -2159,42 +2405,143 @@ fn fixup_link_lines(
             continue;
         }
 
-        // Second pass: link text may span multiple wrapped lines.
-        if let Some(pos) = concat.find(&link.text) {
-            let end_pos = pos + link.text.len();
-            let mut first_set = false;
-            for (i, &(ls, le)) in line_ranges.iter().enumerate() {
-                // Compute overlap of link range [pos, end_pos) with line range [ls, le)
-                let overlap_start = pos.max(ls);
-                let overlap_end = end_pos.min(le);
-                if overlap_start >= overlap_end {
-                    continue;
-                }
-                // Extract portion from stripped content (prefix removed)
-                let stripped = wrapped_lines[i]
-                    .content()
-                    .get(prefix_len..)
-                    .unwrap_or("")
-                    .trim_end();
-                let portion = stripped
-                    .get(overlap_start - ls..overlap_end - ls)
-                    .unwrap_or("");
-                if first_set {
-                    extra.push(LinkRef {
-                        text: portion.to_string(),
-                        url: link.url.clone(),
-                        line: base_line + i,
-                    });
+        // Match each boundary against the original label: a wrap can
+        // remove whitespace or split adjacent CJK characters in the same link.
+        let compact = compact.get_or_insert_with(|| CompactLines::new(wrapped_lines, prefix_len));
+        if let Some(portions) =
+            find_wrapped_link(wrapped_lines, &link.text, prefix_len, &claimed, compact)
+        {
+            for (part, (line, range)) in portions.into_iter().enumerate() {
+                let text = wrapped_lines[line].content()[range.clone()].to_string();
+                claimed.push((line, range.start));
+                if part == 0 {
+                    link.line = base_line + line;
+                    link.text = text;
                 } else {
-                    link.line = base_line + i;
-                    link.text = portion.to_string();
-                    first_set = true;
+                    extra.push(LinkRef {
+                        text,
+                        url: link.url.clone(),
+                        line: base_line + line,
+                    });
                 }
             }
         }
     }
 
     extra
+}
+
+/// Rendered lines with all whitespace removed, so candidate starts for a
+/// wrapped label come from one linear substring search wherever wrapping
+/// dropped spaces or line breaks.
+struct CompactLines {
+    text: String,
+    /// For each char of `text`: its byte offset in `text`, its line, and its
+    /// byte offset in that line's prefix-stripped content.
+    origins: Vec<(usize, usize, usize)>,
+}
+
+impl CompactLines {
+    fn new(lines: &[RenderedLine], prefix_len: usize) -> Self {
+        let mut text = String::new();
+        let mut origins = Vec::new();
+        for (line_idx, line) in lines.iter().enumerate() {
+            let content = line.content().get(prefix_len..).unwrap_or("");
+            for (byte, ch) in content.char_indices() {
+                if !ch.is_whitespace() {
+                    origins.push((text.len(), line_idx, byte));
+                    text.push(ch);
+                }
+            }
+        }
+        Self { text, origins }
+    }
+
+    /// Line and content offset of the char at byte `pos` of `text`.
+    fn origin(&self, pos: usize) -> (usize, usize) {
+        let idx = self.origins.partition_point(|&(byte, _, _)| byte < pos);
+        let (_, line, offset) = self.origins[idx];
+        (line, offset)
+    }
+}
+
+/// Locate a label across lines without inventing a uniform separator.
+/// Every match keeps the label's non-whitespace characters contiguous, so
+/// only occurrences in `compact` are verified, in rendered order.
+fn find_wrapped_link(
+    lines: &[RenderedLine],
+    text: &str,
+    prefix_len: usize,
+    claimed: &[(usize, usize)],
+    compact: &CompactLines,
+) -> Option<Vec<(usize, Range<usize>)>> {
+    let needle: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let first_len = needle.chars().next()?.len_utf8();
+    // Leading whitespace can only match literally on the starting line.
+    let lead = text.len() - text.trim_start().len();
+    let mut from = 0;
+    while let Some(pos) = compact.text[from..].find(&needle) {
+        let hit = from + pos;
+        from = hit + first_len;
+        let (line, offset) = compact.origin(hit);
+        let Some(start) = offset.checked_sub(lead) else {
+            continue;
+        };
+        if claimed.contains(&(line, prefix_len + start)) {
+            continue;
+        }
+        if let Some(portions) = match_wrapped_link(lines, text, prefix_len, line, start) {
+            return Some(portions);
+        }
+    }
+    None
+}
+
+/// Match `text` from byte `start` of `start_line`'s prefix-stripped content.
+/// Whitespace in the original label may disappear only at a line boundary.
+fn match_wrapped_link(
+    lines: &[RenderedLine],
+    text: &str,
+    prefix_len: usize,
+    start_line: usize,
+    start: usize,
+) -> Option<Vec<(usize, Range<usize>)>> {
+    let mut remaining = text;
+    let mut portions = Vec::new();
+    for (idx, line) in lines.iter().enumerate().skip(start_line) {
+        let content = line.content().get(prefix_len..).unwrap_or("").trim_end();
+        let offset = if idx == start_line { start } else { 0 };
+        let part = content.get(offset..)?;
+        if part.is_empty() {
+            remaining = remaining.strip_prefix(HARD_BREAK)?;
+            continue;
+        }
+        let matched = part
+            .chars()
+            .zip(remaining.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(ch, _)| ch.len_utf8())
+            .sum::<usize>();
+        if matched == 0 {
+            return None;
+        }
+        portions.push((idx, prefix_len + offset..prefix_len + offset + matched));
+        remaining = &remaining[matched..];
+        if remaining.is_empty() {
+            return Some(portions);
+        }
+        if matched != part.len() {
+            return None;
+        }
+        // An ordinary wrap may discard spaces, but each explicit
+        // hard break consumes exactly one physical line boundary.
+        remaining = remaining.trim_start_matches(|ch: char| ch.is_whitespace() && ch != '\n');
+        remaining = remaining.strip_prefix(HARD_BREAK).unwrap_or(remaining);
+        if remaining.is_empty() {
+            return Some(portions);
+        }
+    }
+    None
 }
 
 fn collect_inline_elements<'a>(
@@ -2216,6 +2563,8 @@ fn collect_inline_elements<'a>(
         NodeValue::Link(link) => {
             // Use rendered inline text so code-style link labels (e.g. [`foo`])
             // match what appears on screen for clickable line fixups.
+            // Keep explicit breaks so matching can distinguish intentional
+            // empty lines from whitespace discarded by automatic wrapping.
             let text = spans_to_string(&collect_inline_spans(node));
             let url = link.url.clone();
             links.push(LinkRef {
@@ -2503,21 +2852,253 @@ mod tests {
     fn test_gfm_table_preserves_cell_content() {
         let md = "| Very long heading | Value |\n|---|---:|\n| some really long content | 12345 |";
         let doc = Document::parse_with_layout(md, 24).unwrap();
-        let lines = doc.visible_lines(0, 20);
-        let table_lines: Vec<_> = lines
+        let table = table_contents(&doc);
+        for line in &table {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 24, "{line:?}");
+        }
+        for word in ["Very", "long", "heading", "some", "really", "content"] {
+            assert!(
+                table.iter().any(|l| l.contains(word)),
+                "missing {word:?} in table"
+            );
+        }
+        assert_eq!(table.iter().filter(|l| l.contains('┼')).count(), 1);
+    }
+
+    fn paragraph_contents(doc: &Document) -> Vec<String> {
+        doc.visible_lines(0, doc.line_count())
+            .iter()
+            .filter(|l| *l.line_type() == LineType::Paragraph)
+            .map(|l| l.content().to_string())
+            .collect()
+    }
+
+    fn table_contents(doc: &Document) -> Vec<String> {
+        doc.visible_lines(0, doc.line_count())
             .iter()
             .filter(|l| *l.line_type() == LineType::Table)
+            .map(|l| l.content().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_hard_line_break_backslash_and_spaces() {
+        let doc = Document::parse_with_layout("A\\\nB\n\nC  \nD", 80).unwrap();
+        assert_eq!(paragraph_contents(&doc), ["A", "B", "C", "D"]);
+    }
+
+    #[test]
+    fn test_hard_line_break_after_wrapped_space() {
+        for (md, expected) in [
+            ("abcd \\\nX", vec!["abcd", "X"]),
+            ("abcd \\\n\\\nX", vec!["abcd", "", "X"]),
+            ("abcd\\\n\\\nX", vec!["abcd", "", "X"]),
+        ] {
+            let doc = Document::parse_with_layout(md, 4).unwrap();
+            assert_eq!(paragraph_contents(&doc), expected, "{md:?}");
+        }
+    }
+
+    #[test]
+    fn test_hard_line_break_link_preserves_empty_lines() {
+        for prefix in ["", "> ", "- "] {
+            let continuation = if prefix == "- " { "  " } else { prefix };
+            let md = format!("{prefix}[a\\\n{continuation}\\\n{continuation}b](https://x.test)");
+            let doc = Document::parse_with_layout(&md, 80).unwrap();
+            let links = doc.links();
+            assert_eq!(links.len(), 2, "{md:?}: {links:?}");
+            assert_eq!(links[0].text, "a");
+            assert_eq!(links[1].text, "b");
+            assert_eq!(links[1].line, links[0].line + 2);
+            for link in links {
+                assert_eq!(link.url, "https://x.test");
+                assert!(
+                    doc.visible_lines(link.line, 1)[0]
+                        .content()
+                        .contains(&link.text)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_hard_line_break_in_list_item_uses_continuation_indent() {
+        let second_line = |md: &str, width: u16| {
+            let doc = Document::parse_with_layout(md, width).unwrap();
+            doc.visible_lines(0, doc.line_count())[1]
+                .content()
+                .to_string()
+        };
+        let soft_wrapped = second_line("- aaaa bbbb", 9);
+        let indent = soft_wrapped
+            .strip_suffix("bbbb")
+            .expect("soft-wrapped item");
+        assert!(!indent.is_empty() && indent.trim().is_empty());
+        assert_eq!(second_line("- one\\\n  two", 80), format!("{indent}two"));
+    }
+
+    #[test]
+    fn test_cjk_soft_break_joins_without_space() {
+        let render = |md: &str| paragraph_contents(&Document::parse_with_layout(md, 80).unwrap());
+        assert_eq!(render("中文\n继续"), ["中文继续"]);
+        assert_eq!(render("中文\nEnglish"), ["中文 English"]);
+        assert_eq!(render("foo\nbar"), ["foo bar"]);
+        assert_eq!(render("나는\n학생입니다"), ["나는 학생입니다"]);
+    }
+
+    #[test]
+    fn test_cjk_paragraph_wraps_by_character() {
+        let text = "一二三四五六七八九十，".repeat(6);
+        let doc = Document::parse_with_layout(&text, 20).unwrap();
+        let lines = paragraph_contents(&doc);
+        assert!(lines.len() > 1);
+        for line in &lines {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 20, "{line:?}");
+            assert!(!line.starts_with('，'), "{line:?}");
+        }
+        assert_eq!(lines.concat(), text);
+    }
+
+    #[test]
+    fn test_cjk_link_split_across_lines_is_clickable() {
+        let md = "前文前文前文前文[中文链接文本很长很长](https://x.test)";
+        let doc = Document::parse_with_layout(md, 12).unwrap();
+        let refs: Vec<_> = doc
+            .links()
+            .iter()
+            .filter(|l| l.url == "https://x.test")
             .collect();
-        assert!(
-            table_lines
-                .iter()
-                .any(|l| l.content().contains("Very long heading"))
+        assert!(refs.len() > 1, "link should span lines: {refs:?}");
+        let joined: String = refs.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(joined, "中文链接文本很长很长");
+        for link in refs {
+            let line = doc.visible_lines(link.line, 1)[0];
+            assert!(line.content().contains(&link.text), "{link:?}");
+        }
+    }
+
+    #[test]
+    fn test_cjk_mixed_link_keeps_all_wrapped_portions_clickable() {
+        let doc =
+            Document::parse_with_layout("[中文中文 English 中文中文](https://x.test)", 6).unwrap();
+        let links = doc.links();
+        assert_eq!(
+            links.iter().map(|l| l.text.as_str()).collect::<String>(),
+            "中文中文English中文中文"
         );
-        assert!(
-            table_lines
-                .iter()
-                .any(|l| l.content().contains("some really long content"))
+        assert_eq!(
+            links.iter().map(|l| l.line).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
         );
+        for link in links {
+            assert!(
+                doc.visible_lines(link.line, 1)[0]
+                    .content()
+                    .contains(&link.text)
+            );
+        }
+    }
+
+    #[test]
+    fn test_allocate_column_widths() {
+        assert_eq!(allocate_column_widths(&[3, 4], &[1, 1], 40), [3, 4]);
+        let widths = allocate_column_widths(&[2, 50, 50], &[1, 1, 1], 40);
+        assert_eq!(widths[0], 2);
+        assert!(widths.iter().sum::<usize>() + 3 * 3 - 1 <= 40, "{widths:?}");
+        assert_eq!(allocate_column_widths(&[10, 10], &[1, 1], 3), [1, 1]);
+    }
+
+    #[test]
+    fn test_table_wrapped_link_portions_are_clickable() {
+        let md = "| A | B |\n|---|---|\n| [abcdefghijklmnop](https://x.test) | z |";
+        let doc = Document::parse_with_layout(md, 16).unwrap();
+        let links: Vec<_> = doc
+            .links()
+            .iter()
+            .filter(|l| l.url == "https://x.test")
+            .collect();
+        assert_eq!(
+            links.iter().map(|l| l.text.as_str()).collect::<String>(),
+            "abcdefghijklmnop"
+        );
+        assert!(links.len() > 1, "{links:?}");
+        for link in links {
+            assert!(
+                doc.visible_lines(link.line, 1)[0]
+                    .content()
+                    .contains(&link.text),
+                "{link:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_skewed_columns_fit_width() {
+        let md = format!(
+            "| aaa | bbb | {} |\n|---|---|---|\n| x | y | z |",
+            "c".repeat(100)
+        );
+        let doc = Document::parse_with_layout(&md, 14).unwrap();
+        for line in table_contents(&doc) {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 14, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn test_table_keeps_wide_characters_when_width_allows() {
+        let md = format!("| A | B |\n|---|---|\n| {} | 中文字 |", "x".repeat(100));
+        let doc = Document::parse_with_layout(&md, 15).unwrap();
+        let table = table_contents(&doc);
+        for ch in ['中', '文', '字'] {
+            assert!(table.iter().any(|l| l.contains(ch)), "{ch}: {table:#?}");
+        }
+        for line in &table {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 15, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn test_table_wraps_long_cell_and_keeps_alignment_and_links() {
+        let md = "| IC | 新建项 | 级 |\n|---|---|---:|\n| IC-016 | [ast-cu9.15](https://a.test) Analysis Object 名称约束，Authority Instance 永久 UUID | P1 |";
+        let doc = Document::parse_with_layout(md, 40).unwrap();
+        let table = table_contents(&doc);
+        for line in &table {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 40, "{line:?}");
+        }
+        let divider = table
+            .iter()
+            .position(|l| l.contains('┼'))
+            .expect("header divider");
+        assert!(
+            table.len() - divider - 1 >= 2,
+            "data row should wrap: {table:#?}"
+        );
+        assert!(table.iter().any(|l| l.contains("UUID")));
+        assert!(
+            table.iter().any(|l| l.ends_with("P1")),
+            "right alignment lost: {table:#?}"
+        );
+        let link = doc
+            .links()
+            .iter()
+            .find(|l| l.url == "https://a.test")
+            .expect("table link");
+        assert!(
+            doc.visible_lines(link.line, 1)[0]
+                .content()
+                .contains("ast-cu9.15")
+        );
+    }
+
+    #[test]
+    fn test_csv_wraps_to_width() {
+        let md = "```csv\nname,desc\nx,aaaa bbbb cccc dddd eeee ffff\n```";
+        let doc = Document::parse_with_layout(md, 20).unwrap();
+        let table = table_contents(&doc);
+        for line in &table {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 20, "{line:?}");
+        }
+        assert!(table.iter().any(|l| l.contains("ffff")));
     }
 
     #[test]
@@ -3242,21 +3823,19 @@ mod tests {
         let md =
             "```csv\nVery Long Column Name,Another Long Name\nsome really long content,12345\n```";
         let doc = Document::parse_with_layout(md, 30).unwrap();
-        let lines = doc.visible_lines(0, 20);
-        let table_lines: Vec<_> = lines
-            .iter()
-            .filter(|l| *l.line_type() == LineType::Table)
-            .collect();
-        assert!(
-            table_lines
-                .iter()
-                .any(|l| l.content().contains("Very Long Column Name"))
-        );
-        assert!(
-            table_lines
-                .iter()
-                .any(|l| l.content().contains("some really long content"))
-        );
+        let table = table_contents(&doc);
+        for line in &table {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 30, "{line:?}");
+        }
+        for word in [
+            "Very", "Long", "Column", "Name", "Another", "some", "really", "long", "content",
+            "12345",
+        ] {
+            assert!(
+                table.iter().any(|l| l.contains(word)),
+                "missing {word:?} in table"
+            );
+        }
     }
 
     #[test]
