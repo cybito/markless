@@ -92,7 +92,26 @@ pub struct LineSelection {
     pub mode: SelectionMode,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ReadingState {
+    file_path: PathBuf,
+    offset: usize,
+    image_layout_heights: HashMap<String, usize>,
+    toc_visible: bool,
+    toc_focused: bool,
+    toc_selected: Option<usize>,
+    toc_scroll_offset: usize,
+    browse_mode: bool,
+    browse_dir: PathBuf,
+    browse_selected_path: Option<PathBuf>,
+    search_query: Option<String>,
+    search_match_index: Option<usize>,
+    search_allow_short: bool,
+}
+
 pub struct Model {
+    pub(super) back_history: Vec<ReadingState>,
+    pub(super) forward_history: Vec<ReadingState>,
     /// The loaded markdown document
     pub document: Document,
     /// Viewport managing scroll position
@@ -216,6 +235,8 @@ impl Model {
             .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
 
         Self {
+            back_history: Vec::new(),
+            forward_history: Vec::new(),
             document,
             viewport: Viewport::new(
                 terminal_size.0,
@@ -486,11 +507,14 @@ impl Model {
             self.show_toast(ToastLevel::Warning, "Math render failed, showing text");
         }
 
-        let current_layout_heights: HashMap<String, usize> = self
-            .image_protocols
-            .iter()
-            .map(|(src, (_, _, height_rows))| (src.clone(), *height_rows as usize))
-            .collect();
+        // History can restore reserved heights before offscreen images have protocols.
+        // Keep those reservations until each image is loaded at its current size.
+        let mut current_layout_heights = self.image_layout_heights.clone();
+        current_layout_heights.extend(
+            self.image_protocols
+                .iter()
+                .map(|(src, (_, _, height_rows))| (src.clone(), *height_rows as usize)),
+        );
 
         if mermaid_failed || math_failed || current_layout_heights != self.image_layout_heights {
             if current_layout_heights != self.image_layout_heights {
@@ -775,8 +799,27 @@ impl Model {
     /// Returns an error if the file cannot be read or the document
     /// fails to parse.
     pub fn load_file(&mut self, path: &Path) -> Result<()> {
+        self.load_navigation_file(path)?;
+        self.back_history.clear();
+        self.forward_history.clear();
+        Ok(())
+    }
+
+    pub(super) fn load_navigation_file(&mut self, path: &Path) -> Result<()> {
         let raw_bytes = std::fs::read(path)?;
-        let document = self.document_from_bytes(path, raw_bytes)?;
+        // Never parse a new file with layout heights or diagram failures from the old one.
+        let old_heights = std::mem::take(&mut self.image_layout_heights);
+        let old_mermaid = std::mem::take(&mut self.failed_mermaid_srcs);
+        let old_math = std::mem::take(&mut self.failed_math_srcs);
+        let document = match self.document_from_bytes(path, raw_bytes) {
+            Ok(document) => document,
+            Err(err) => {
+                self.image_layout_heights = old_heights;
+                self.failed_mermaid_srcs = old_mermaid;
+                self.failed_math_srcs = old_math;
+                return Err(err);
+            }
+        };
         self.file_path = path.to_path_buf();
         self.base_dir = path
             .parent()
@@ -788,6 +831,7 @@ impl Model {
         self.original_images.clear();
         self.image_layout_heights.clear();
         self.failed_mermaid_srcs.clear();
+        self.failed_math_srcs.clear();
 
         self.viewport.set_total_lines(self.document.line_count());
         self.viewport.go_to_top();
@@ -796,6 +840,114 @@ impl Model {
         refresh_search_matches(self, false, allow_short);
         self.clear_selection();
         Ok(())
+    }
+
+    pub(super) fn reading_state(&self) -> ReadingState {
+        ReadingState {
+            file_path: self.file_path.clone(),
+            offset: self.viewport.offset(),
+            image_layout_heights: self.image_layout_heights.clone(),
+            toc_visible: self.toc_visible,
+            toc_focused: self.toc_focused,
+            toc_selected: self.toc_selected,
+            toc_scroll_offset: self.toc_scroll_offset,
+            browse_mode: self.browse_mode,
+            browse_dir: self.browse_dir.clone(),
+            browse_selected_path: self
+                .toc_selected
+                .and_then(|i| self.browse_entries.get(i))
+                .map(|e| e.path.clone()),
+            search_query: self.search_query.clone(),
+            search_match_index: self.search_match_index,
+            search_allow_short: self.search_allow_short,
+        }
+    }
+
+    pub(super) fn record_jump(&mut self, origin: ReadingState) {
+        self.back_history.push(origin);
+        self.forward_history.clear();
+    }
+
+    pub(super) fn navigate_history(&mut self, forward: bool) {
+        if self.editor_mode {
+            return;
+        }
+        let history = if forward {
+            &self.forward_history
+        } else {
+            &self.back_history
+        };
+        let Some(target) = history.last().cloned() else {
+            self.show_toast(
+                ToastLevel::Info,
+                if forward {
+                    "No forward history"
+                } else {
+                    "No back history"
+                },
+            );
+            return;
+        };
+        let origin = self.reading_state();
+        // Set the target layout before parsing, but roll it back on failure.
+        self.toc_visible = target.toc_visible;
+        if let Err(err) = self.load_navigation_file(&target.file_path) {
+            self.toc_visible = origin.toc_visible;
+            self.show_toast(ToastLevel::Error, format!("Navigation failed: {err}"));
+            return;
+        }
+        // Reconstruct the saved layout before applying its rendered-line offset.
+        // Only retain images still referenced by the freshly read document.
+        self.image_layout_heights = target.image_layout_heights;
+        self.image_layout_heights
+            .retain(|src, _| self.document.images().iter().any(|image| &image.src == src));
+        if !self.image_layout_heights.is_empty() {
+            self.reflow_layout();
+        }
+        self.browse_mode = target.browse_mode;
+        if target.browse_mode {
+            if let Err(err) = self.load_directory(&target.browse_dir) {
+                self.browse_entries.clear();
+                self.show_toast(
+                    ToastLevel::Warning,
+                    format!("Directory restore failed: {err}"),
+                );
+            }
+        } else {
+            self.browse_dir = target.browse_dir;
+            self.browse_entries.clear();
+        }
+        self.toc_focused = target.toc_focused && target.toc_visible;
+        self.search_query = target.search_query;
+        self.search_allow_short = target.search_allow_short;
+        refresh_search_matches(self, false, target.search_allow_short);
+        self.viewport.go_to_line(target.offset);
+        // Image layout may reflow; restore the offset after nearby images load too.
+        self.load_nearby_images();
+        self.viewport.go_to_line(target.offset);
+        self.toc_selected = if target.browse_mode {
+            target
+                .browse_selected_path
+                .as_ref()
+                .and_then(|path| self.browse_entries.iter().position(|e| &e.path == path))
+        } else {
+            target.toc_selected.filter(|&i| i < self.toc_entry_count())
+        };
+        self.toc_scroll_offset = target.toc_scroll_offset.min(self.max_toc_scroll_offset());
+        self.search_match_index = target
+            .search_match_index
+            .filter(|&i| i < self.search_matches.len());
+        self.hovered_link_url = None;
+        self.link_picker_items.clear();
+        self.clear_selection();
+        self.needs_full_redraw = true;
+        if forward {
+            self.forward_history.pop();
+            self.back_history.push(origin);
+        } else {
+            self.back_history.pop();
+            self.forward_history.push(origin);
+        }
     }
 
     /// Return the index and path of the first viewable file in `browse_entries`,
@@ -1190,6 +1342,8 @@ pub(super) fn is_markdown_ext(name: &str) -> bool {
 impl Default for Model {
     fn default() -> Self {
         Self {
+            back_history: Vec::new(),
+            forward_history: Vec::new(),
             document: Document::empty(),
             viewport: Viewport::new(80, 24, 0),
             file_path: PathBuf::new(),

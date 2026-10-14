@@ -255,17 +255,22 @@ impl App {
         now_ms: u64,
         debouncer: &mut BrowseDebouncer,
     ) {
-        if !model.browse_mode {
-            return;
-        }
         match msg {
-            Message::TocUp | Message::TocDown | Message::TocScrollUp | Message::TocScrollDown => {
+            Message::NavigateBack
+            | Message::NavigateForward
+            | Message::OpenVisibleLinks
+            | Message::FollowLinkAtLine(_, _)
+            | Message::SelectVisibleLink(_)
+            | Message::EnterFileMode
+            | Message::TocSelect
+            | Message::TocClick(_)
+            | Message::TocExpand => debouncer.cancel(),
+            Message::TocUp | Message::TocDown | Message::TocScrollUp | Message::TocScrollDown
+                if model.browse_mode =>
+            {
                 if let Some(sel) = model.toc_selected {
                     debouncer.queue(sel, now_ms);
                 }
-            }
-            Message::TocSelect | Message::TocClick(_) | Message::TocExpand => {
-                debouncer.cancel();
             }
             _ => {}
         }
@@ -555,4 +560,23 @@ pub(super) fn set_mouse_motion_tracking(enable: bool) -> std::io::Result<()> {
         out.write_all(b"\x1b[?1003l\x1b[?1006l")?;
     }
     out.flush()
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn history_navigation_cancels_pending_browse_preview_in_either_mode() {
+        for browse_mode in [false, true] {
+            for msg in [Message::NavigateBack, Message::NavigateForward] {
+                let mut model = Model::default();
+                model.browse_mode = browse_mode;
+                let mut debouncer = BrowseDebouncer::new(400);
+                debouncer.queue(1, 0);
+                App::update_browse_debouncer(&model, &msg, 10, &mut debouncer);
+                assert_eq!(debouncer.take_ready(500), None);
+            }
+        }
+    }
 }

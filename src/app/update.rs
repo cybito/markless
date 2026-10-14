@@ -8,6 +8,10 @@ use crate::editor::Direction;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     // Navigation
+    /// Return to the previous jump location.
+    NavigateBack,
+    /// Revisit the next jump location.
+    NavigateForward,
     /// Scroll up by n lines
     ScrollUp(usize),
     /// Scroll down by n lines
@@ -181,6 +185,11 @@ pub fn update(mut model: Model, msg: Message) -> Model {
             | Message::TocExpand
             | Message::FileChanged
             | Message::ForceReload
+            | Message::NavigateBack
+            | Message::NavigateForward
+            | Message::OpenVisibleLinks
+            | Message::FollowLinkAtLine(_, _)
+            | Message::SelectVisibleLink(_)
             | Message::HoverLink(_)
     );
     // Reset confirmation flags on any action other than the confirmed one.
@@ -390,7 +399,9 @@ pub fn update(mut model: Model, msg: Message) -> Model {
             model.search_match_index = None;
             model.search_allow_short = false;
         }
-        Message::OpenVisibleLinks
+        Message::NavigateBack
+        | Message::NavigateForward
+        | Message::OpenVisibleLinks
         | Message::FollowLinkAtLine(_, _)
         | Message::SelectVisibleLink(_) => {
             model.clear_selection();

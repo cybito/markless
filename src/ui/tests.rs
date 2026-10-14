@@ -149,13 +149,13 @@ fn test_help_overlay_shows_config_paths_full_width() {
     let mut model = Model::new(
         PathBuf::from("test.md"),
         Document::parse("# Title").unwrap(),
-        (80, 60),
+        (80, 64),
     );
     model.help_visible = true;
     model.config_global_path = Some(PathBuf::from("/path/that/should/be/visible/in/help/config"));
     model.config_local_path = Some(PathBuf::from("/local/override/path/visible/in/help/config"));
 
-    let backend = TestBackend::new(80, 60);
+    let backend = TestBackend::new(80, 64);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(&mut model, frame)).unwrap();
 

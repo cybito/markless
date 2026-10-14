@@ -84,6 +84,8 @@ impl App {
                     model.show_toast(ToastLevel::Info, "File changed, reloaded");
                 }
             }
+            Message::NavigateBack => model.navigate_history(false),
+            Message::NavigateForward => model.navigate_history(true),
             Message::OpenVisibleLinks => {
                 Self::open_visible_links(model);
             }
@@ -212,7 +214,9 @@ impl App {
     fn follow_resolved_link(model: &mut Model, url: &str) {
         if let Some(name) = url.strip_prefix("footnote:") {
             if let Some(target) = model.document.footnote_line(name) {
+                let origin = model.reading_state();
                 model.viewport.go_to_line(target);
+                model.record_jump(origin);
                 model.show_toast(ToastLevel::Info, format!("Jumped to footnote [^{name}]"));
             } else {
                 model.show_toast(ToastLevel::Warning, format!("Footnote [^{name}] not found"));
@@ -222,7 +226,9 @@ impl App {
 
         if let Some(anchor) = url.strip_prefix('#') {
             if let Some(target) = model.document.resolve_internal_anchor(anchor) {
+                let origin = model.reading_state();
                 model.viewport.go_to_line(target);
+                model.record_jump(origin);
                 model.show_toast(ToastLevel::Info, format!("Jumped to #{anchor}"));
             } else {
                 model.show_toast(ToastLevel::Warning, format!("Anchor #{anchor} not found"));
@@ -241,8 +247,10 @@ impl App {
         }
 
         if let Some((path, anchor)) = resolve_local_file_link(model, url) {
-            match model.load_file(&path) {
+            let origin = model.reading_state();
+            match model.load_navigation_file(&path) {
                 Ok(()) => {
+                    model.record_jump(origin);
                     Self::sync_browse_state_to_loaded_file(model);
                     if let Some(anchor) = anchor {
                         if let Some(target) = model.document.resolve_internal_anchor(&anchor) {

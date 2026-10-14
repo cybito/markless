@@ -99,6 +99,7 @@ Navigation
 - `b` / `PageUp`: page up
 - `d` / `u`: half page
 - `g` / `G`: top / bottom
+- `[` / `]`: back / forward through link and image jumps, restoring reading position, search, and sidebar state. Files are reread from disk; a new jump clears forward history. Directory file selection starts a new history. Clear search with `Esc` before navigating.
 
 Search
 - `/`: start search

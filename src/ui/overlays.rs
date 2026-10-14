@@ -117,6 +117,10 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     all_lines.push(Line::raw("  g / G               Top / bottom"));
     all_lines.push(Line::raw(""));
 
+    all_lines.push(Line::raw(
+        "  [ / ]               Back / forward through jumps",
+    ));
+
     // Search
     all_lines.push(Line::styled("Search", section_style));
     all_lines.push(Line::raw("  /                   Start search"));

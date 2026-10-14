@@ -331,6 +331,17 @@ impl App {
             };
         }
 
+        if !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            match key.code {
+                KeyCode::Char('[') => return Some(Message::NavigateBack),
+                KeyCode::Char(']') => return Some(Message::NavigateForward),
+                _ => {}
+            }
+        }
+
         // Global keys — always apply regardless of TOC focus
         match key.code {
             KeyCode::Char(' ') | KeyCode::PageDown if model.viewport.can_scroll_down() => {

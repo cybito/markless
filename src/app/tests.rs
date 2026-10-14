@@ -4351,3 +4351,262 @@ fn test_modified_click_previews_line_and_paragraph_before_release() {
         assert!((0..4).all(|line| model.selection_bytes(line).is_none()));
     }
 }
+
+fn history_message(model: &mut Model, msg: Message) {
+    let side_msg = msg.clone();
+    *model = update(std::mem::take(model), msg);
+    App::handle_message_side_effects(model, &mut None, &side_msg);
+}
+
+#[test]
+fn test_navigation_history_restores_image_origin_and_latest_content() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.md");
+    let image = dir.path().join("image.png");
+    image::RgbImage::new(2, 2).save(&image).unwrap();
+    let text = format!("{}\n![image](image.png)\n", "paragraph\n\n".repeat(40));
+    std::fs::write(&source, &text).unwrap();
+    let mut model = Model::new(
+        source.clone(),
+        Document::parse_with_layout(&text, 80).unwrap(),
+        (80, 8),
+    );
+    model.toc_visible = true;
+    model.toc_focused = true;
+    model.viewport.go_to_line(12);
+    model.search_query = Some("paragraph".into());
+    let line = model.document.images()[0].line_range.start;
+    history_message(&mut model, Message::FollowLinkAtLine(line, None));
+    assert_eq!(model.file_path, image);
+    model.search_query = None;
+    model.toc_visible = false;
+    model.toc_focused = false;
+    std::fs::write(&source, format!("{text}\nLatest content")).unwrap();
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.file_path, source);
+    assert_eq!(model.viewport.offset(), 12);
+    assert_eq!(model.search_query.as_deref(), Some("paragraph"));
+    assert!(model.toc_visible && model.toc_focused);
+    assert!(model.document.source().contains("Latest content"));
+    assert!(model.search_match_count() > 0);
+    history_message(&mut model, Message::NavigateForward);
+    assert_eq!(model.file_path, image);
+    assert!(!model.toc_visible);
+}
+
+#[test]
+fn test_navigation_history_branch_and_failure_are_transactional() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a.md");
+    let b = dir.path().join("b.md");
+    let c = dir.path().join("c.md");
+    std::fs::write(&a, "[B](b.md)\n[C](c.md)\n[Missing](missing.md)").unwrap();
+    std::fs::write(&b, "# B").unwrap();
+    std::fs::write(&c, "# C").unwrap();
+    let mut model = Model::new(a.clone(), Document::empty(), (80, 8));
+    model.load_file(&a).unwrap();
+    let line = model.document.links()[0].line;
+    history_message(&mut model, Message::FollowLinkAtLine(line, Some(0)));
+    assert_eq!(model.back_history.len(), 1);
+    std::fs::remove_file(&a).unwrap();
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.file_path, b);
+    assert_eq!(model.back_history.len(), 1);
+    assert!(model.forward_history.is_empty());
+    std::fs::write(&a, "[C](c.md)\n\n[Missing](missing.md)").unwrap();
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.file_path, a);
+    assert_eq!(model.forward_history.len(), 1);
+    let line = model.document.links()[1].line;
+    history_message(&mut model, Message::FollowLinkAtLine(line, None));
+    assert!(model.back_history.is_empty());
+    assert_eq!(model.forward_history.len(), 1);
+    let line = model.document.links()[0].line;
+    history_message(&mut model, Message::FollowLinkAtLine(line, None));
+    assert_eq!(model.file_path, c);
+    assert!(model.forward_history.is_empty());
+    model.load_file(&b).unwrap();
+    assert!(model.back_history.is_empty());
+}
+
+#[test]
+fn test_navigation_history_anchor_and_key_modes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("a.md");
+    let text = format!(
+        "[Target](#target)\n\n{}\n## Target\n",
+        "text\n\n".repeat(30)
+    );
+    std::fs::write(&path, &text).unwrap();
+    let mut model = Model::new(
+        path,
+        Document::parse_with_layout(&text, 80).unwrap(),
+        (80, 8),
+    );
+    history_message(&mut model, Message::OpenVisibleLinks);
+    let target_offset = model.viewport.offset();
+    assert!(target_offset > 0);
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.viewport.offset(), 0);
+    history_message(&mut model, Message::NavigateForward);
+    assert_eq!(model.viewport.offset(), target_offset);
+    for focused in [false, true] {
+        model.toc_focused = focused;
+        for (key, msg) in [
+            ('[', Message::NavigateBack),
+            (']', Message::NavigateForward),
+        ] {
+            assert_eq!(
+                App::handle_key(
+                    event::KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    &model
+                ),
+                Some(msg)
+            );
+        }
+    }
+    model.search_query = Some("x".into());
+    assert_eq!(
+        App::handle_key(
+            event::KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+            &model
+        ),
+        Some(Message::SearchInput("x[".into()))
+    );
+    model.editor_mode = true;
+    assert_eq!(
+        App::handle_key(
+            event::KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+            &model
+        ),
+        Some(Message::EditorInsertChar(']'))
+    );
+}
+
+#[test]
+fn test_history_restores_browse_directory_after_cross_directory_link() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let child = root.join("child");
+    std::fs::create_dir(&child).unwrap();
+    let a = root.join("a.md");
+    let b = child.join("b.md");
+    std::fs::write(&a, "[B](child/b.md)").unwrap();
+    std::fs::write(&b, "# B").unwrap();
+    let mut model = Model::new(a.clone(), Document::empty(), (80, 8));
+    model.load_file(&a).unwrap();
+    model.browse_mode = true;
+    model.toc_visible = true;
+    model.toc_focused = true;
+    model.load_directory(&root).unwrap();
+    model.toc_selected = model.browse_entries.iter().position(|e| e.path == a);
+    history_message(&mut model, Message::OpenVisibleLinks);
+    assert_eq!(model.browse_dir, child);
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.browse_dir, root);
+    assert_eq!(model.browse_entries[model.toc_selected.unwrap()].path, a);
+    assert!(model.toc_focused);
+    history_message(&mut model, Message::NavigateForward);
+    assert_eq!(model.browse_dir, child);
+    assert_eq!(model.browse_entries[model.toc_selected.unwrap()].path, b);
+}
+
+#[test]
+fn test_history_footnote_resize_and_empty_history() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    let text = format!(
+        "Note[^1]\n\n{}\n[^1]: Definition\n",
+        "padding\n\n".repeat(30)
+    );
+    std::fs::write(&path, &text).unwrap();
+    let mut model = Model::new(
+        path,
+        Document::parse_with_layout(&text, 80).unwrap(),
+        (80, 8),
+    );
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.viewport.offset(), 0);
+    history_message(&mut model, Message::OpenVisibleLinks);
+    assert_eq!(model.back_history.len(), 1);
+    history_message(&mut model, Message::Resize(40, 12));
+    history_message(&mut model, Message::NavigateBack);
+    assert_eq!(model.viewport.offset(), 0);
+    assert_eq!(model.viewport.width(), 40);
+    history_message(&mut model, Message::NavigateForward);
+    assert!(model.viewport.offset() > 0);
+    let offset = model.viewport.offset();
+    history_message(&mut model, Message::NavigateForward);
+    assert_eq!(model.viewport.offset(), offset);
+}
+
+#[test]
+fn test_history_restores_reading_content_below_loaded_images() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.md");
+    let target = dir.path().join("target.md");
+    image::RgbImage::new(20, 20)
+        .save(dir.path().join("above.png"))
+        .unwrap();
+    let text = format!(
+        "![Above](above.png)\n\n{}\n[Reading here](target.md)\n\n{}",
+        "padding\n\n".repeat(40),
+        "tail\n\n".repeat(40)
+    );
+    std::fs::write(&source, &text).unwrap();
+    std::fs::write(&target, text.replace("Reading here", "Target reading")).unwrap();
+    let mut model = Model::new(source.clone(), Document::empty(), (80, 8));
+    model.picker = Some(ratatui_image::picker::Picker::halfblocks());
+    model.load_file(&source).unwrap();
+    model.load_nearby_images();
+    assert!(model.document.images()[0].line_range.len() > 1);
+    let line = model
+        .document
+        .links()
+        .iter()
+        .find(|link| link.url == "target.md")
+        .unwrap()
+        .line;
+    model.viewport.go_to_line(line);
+    assert!(model.document.images()[0].line_range.end < line - 14);
+    let reading_content = model.document.line_at(line).unwrap().content().to_string();
+    history_message(&mut model, Message::FollowLinkAtLine(line, None));
+    assert_eq!(model.file_path, target);
+    model.load_nearby_images();
+    model.viewport.go_to_line(line);
+    for _ in 0..2 {
+        history_message(&mut model, Message::NavigateBack);
+        assert_eq!(model.file_path, source);
+        // Subsequent render passes must not discard the restored offscreen layout.
+        for _ in 0..2 {
+            model.load_nearby_images();
+            assert_eq!(
+                model
+                    .document
+                    .line_at(model.viewport.offset())
+                    .unwrap()
+                    .content(),
+                reading_content,
+                "history must return to the same content below an offscreen image"
+            );
+        }
+        history_message(&mut model, Message::NavigateForward);
+        assert_eq!(model.file_path, target);
+        model.load_nearby_images();
+        assert_eq!(
+            model
+                .document
+                .line_at(model.viewport.offset())
+                .unwrap()
+                .content(),
+            "Target reading"
+        );
+    }
+    // A changed source is still read from disk, without resurrecting removed images.
+    std::fs::write(&source, "# Updated source").unwrap();
+    history_message(&mut model, Message::NavigateBack);
+    model.load_nearby_images();
+    assert!(model.document.images().is_empty());
+    assert_eq!(model.viewport.offset(), 0);
+    assert!(model.document.source().contains("Updated source"));
+}
