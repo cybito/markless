@@ -388,7 +388,7 @@ fn process_node<'a, S: BuildHasher>(
                 // If the paragraph has leading text before the math,
                 // render that text first as a regular paragraph.
                 if let Some(spans) = collect_spans_before_display_math(node) {
-                    let wrapped = wrap_spans(&spans, ctx.wrap_width, "", "");
+                    let wrapped = wrap_spans(&spans, ctx.wrap_width, "", "", false);
                     for line_spans in wrapped {
                         let content = spans_to_string(&line_spans);
                         ctx.lines.push(RenderedLine::with_spans(
@@ -422,7 +422,7 @@ fn process_node<'a, S: BuildHasher>(
                 // When no_inline_math is enabled, split paragraph at
                 // inline math boundaries so each $...$ gets its own image.
                 if ctx.no_inline_math && ctx.math_as_images && has_inline_math(node) {
-                    emit_paragraph_with_no_inline_math(node, ctx, "", "");
+                    emit_paragraph_with_no_inline_math(node, ctx, "", "", false);
                 } else {
                     // Regular paragraph text with inline styling and wrapping
                     let spans = collect_inline_spans(node);
@@ -431,7 +431,7 @@ fn process_node<'a, S: BuildHasher>(
                     collect_inline_elements(node, 0, &mut ctx.images, &mut ctx.link_refs);
 
                     let base_line = ctx.lines.len();
-                    let wrapped = wrap_spans(&spans, ctx.wrap_width, "", "");
+                    let wrapped = wrap_spans(&spans, ctx.wrap_width, "", "", false);
                     for line_spans in wrapped {
                         let content = spans_to_string(&line_spans);
                         ctx.lines.push(RenderedLine::with_spans(
@@ -620,7 +620,7 @@ fn process_node<'a, S: BuildHasher>(
             let link_start = ctx.link_refs.len();
             collect_inline_elements(node, 0, &mut ctx.images, &mut ctx.link_refs);
             let base_line = ctx.lines.len();
-            let wrapped = wrap_spans(&spans, ctx.wrap_width, &prefix_first, &prefix_next);
+            let wrapped = wrap_spans(&spans, ctx.wrap_width, &prefix_first, &prefix_next, true);
             for line_spans in wrapped {
                 let content = spans_to_string(&line_spans);
                 ctx.lines.push(RenderedLine::with_spans(
@@ -666,8 +666,13 @@ fn process_node<'a, S: BuildHasher>(
                                 } else {
                                     &prefix_first
                                 };
-                                let wrapped =
-                                    wrap_spans(&spans, ctx.wrap_width, prefix, &prefix_next);
+                                let wrapped = wrap_spans(
+                                    &spans,
+                                    ctx.wrap_width,
+                                    prefix,
+                                    &prefix_next,
+                                    !rendered_any,
+                                );
                                 for line_spans in wrapped {
                                     let content = spans_to_string(&line_spans);
                                     ctx.lines.push(RenderedLine::with_spans(
@@ -705,13 +710,25 @@ fn process_node<'a, S: BuildHasher>(
                             &prefix_first
                         };
                         if ctx.no_inline_math && ctx.math_as_images && has_inline_math(child) {
-                            emit_paragraph_with_no_inline_math(child, ctx, prefix, &prefix_next);
+                            emit_paragraph_with_no_inline_math(
+                                child,
+                                ctx,
+                                prefix,
+                                &prefix_next,
+                                !rendered_any,
+                            );
                         } else {
                             let spans = collect_inline_spans(child);
                             let link_start = ctx.link_refs.len();
                             collect_inline_elements(child, 0, &mut ctx.images, &mut ctx.link_refs);
                             let base_line = ctx.lines.len();
-                            let wrapped = wrap_spans(&spans, ctx.wrap_width, prefix, &prefix_next);
+                            let wrapped = wrap_spans(
+                                &spans,
+                                ctx.wrap_width,
+                                prefix,
+                                &prefix_next,
+                                !rendered_any,
+                            );
 
                             for line_spans in wrapped {
                                 let content = spans_to_string(&line_spans);
@@ -743,7 +760,7 @@ fn process_node<'a, S: BuildHasher>(
                 let link_start = ctx.link_refs.len();
                 collect_inline_elements(node, 0, &mut ctx.images, &mut ctx.link_refs);
                 let base_line = ctx.lines.len();
-                let wrapped = wrap_spans(&spans, ctx.wrap_width, &prefix_first, &prefix_next);
+                let wrapped = wrap_spans(&spans, ctx.wrap_width, &prefix_first, &prefix_next, true);
                 for line_spans in wrapped {
                     let content = spans_to_string(&line_spans);
                     ctx.lines.push(RenderedLine::with_spans(
@@ -811,7 +828,7 @@ fn process_node<'a, S: BuildHasher>(
             let link_start = ctx.link_refs.len();
             collect_inline_elements(node, 0, &mut ctx.images, &mut ctx.link_refs);
             let base_line = ctx.lines.len();
-            let wrapped = wrap_spans(&spans, ctx.wrap_width, &label, &continuation);
+            let wrapped = wrap_spans(&spans, ctx.wrap_width, &label, &continuation, false);
             if wrapped.is_empty() {
                 ctx.lines
                     .push(RenderedLine::new(label, LineType::Paragraph));
@@ -980,13 +997,23 @@ fn emit_code_block<S: BuildHasher>(
             frame_inner_width.saturating_sub(UnicodeWidthStr::width(visible_label.as_str()))
         )
     );
-    ctx.lines.push(RenderedLine::new(top, LineType::CodeBlock));
+    let frame_style = InlineStyle {
+        code_frame: true,
+        ..InlineStyle::default()
+    };
+    let top_spans = vec![InlineSpan::new(top.clone(), frame_style)];
+    ctx.lines.push(RenderedLine::with_spans(
+        top,
+        LineType::CodeBlock,
+        top_spans,
+    ));
 
     let body_start = ctx.lines.len();
     let raw_lines: Vec<String> = literal.lines().map(ToString::to_string).collect();
     for raw_line in &raw_lines {
         let plain_style = InlineStyle {
             code: true,
+            code_block: true,
             ..InlineStyle::default()
         };
         let spans = vec![InlineSpan::new(raw_line.clone(), plain_style)];
@@ -995,12 +1022,9 @@ fn emit_code_block<S: BuildHasher>(
         let padding = " ".repeat(content_width.saturating_sub(trimmed_len) + CODE_RIGHT_PADDING);
 
         let mut line_spans = Vec::new();
-        line_spans.push(InlineSpan::new("│ ".to_string(), InlineStyle::default()));
+        line_spans.push(InlineSpan::new("│ ".to_string(), frame_style));
         line_spans.extend(trimmed_spans);
-        line_spans.push(InlineSpan::new(
-            format!("{padding} │"),
-            InlineStyle::default(),
-        ));
+        line_spans.push(InlineSpan::new(format!("{padding} │"), frame_style));
         let content = spans_to_string(&line_spans);
         ctx.lines.push(RenderedLine::with_spans(
             content,
@@ -1019,9 +1043,12 @@ fn emit_code_block<S: BuildHasher>(
         right_padding: CODE_RIGHT_PADDING,
     });
 
-    ctx.lines.push(RenderedLine::new(
-        format!("└{}┘", "─".repeat(frame_inner_width)),
+    let bottom = format!("└{}┘", "─".repeat(frame_inner_width));
+    let bottom_spans = vec![InlineSpan::new(bottom.clone(), frame_style)];
+    ctx.lines.push(RenderedLine::with_spans(
+        bottom,
         LineType::CodeBlock,
+        bottom_spans,
     ));
     ctx.lines
         .push(RenderedLine::new(String::new(), LineType::Empty));
@@ -1137,6 +1164,7 @@ fn emit_paragraph_with_no_inline_math<'a, S: BuildHasher>(
     ctx: &mut ParseContext<'_, S>,
     prefix_first: &str,
     prefix_next: &str,
+    first_prefix_is_list_marker: bool,
 ) {
     let line_type = if prefix_first.is_empty() {
         LineType::Paragraph
@@ -1173,6 +1201,7 @@ fn emit_paragraph_with_no_inline_math<'a, S: BuildHasher>(
                 is_first_chunk,
                 prefix_first,
                 prefix_next,
+                first_prefix_is_list_marker,
             );
             pending_spans.clear();
             is_first_chunk = false;
@@ -1203,6 +1232,7 @@ fn emit_paragraph_with_no_inline_math<'a, S: BuildHasher>(
         is_first_chunk,
         prefix_first,
         prefix_next,
+        first_prefix_is_list_marker,
     );
 
     // Fix up link line numbers to match rendered output lines.
@@ -1224,6 +1254,7 @@ fn flush_inline_spans<S: BuildHasher>(
     is_first: bool,
     prefix_first: &str,
     prefix_next: &str,
+    first_prefix_is_list_marker: bool,
 ) {
     if spans.is_empty() {
         return;
@@ -1242,7 +1273,13 @@ fn flush_inline_spans<S: BuildHasher>(
         return;
     }
     let prefix = if is_first { prefix_first } else { prefix_next };
-    let wrapped = wrap_spans(trimmed, ctx.wrap_width, prefix, prefix_next);
+    let wrapped = wrap_spans(
+        trimmed,
+        ctx.wrap_width,
+        prefix,
+        prefix_next,
+        is_first && first_prefix_is_list_marker,
+    );
     for line_spans in wrapped {
         let content = spans_to_string(&line_spans);
         ctx.lines
@@ -1278,7 +1315,7 @@ fn render_blockquote<'a>(
                 let link_start = link_refs.len();
                 collect_inline_elements(child, 0, images, link_refs);
                 let base_line = lines.len();
-                let wrapped = wrap_spans(&spans, wrap_width, &prefix, &prefix);
+                let wrapped = wrap_spans(&spans, wrap_width, &prefix, &prefix, false);
                 for line_spans in wrapped {
                     let content = spans_to_string(&line_spans);
                     lines.push(RenderedLine::with_spans(
@@ -1308,7 +1345,7 @@ fn render_blockquote<'a>(
                         raw_line.to_string(),
                         InlineStyle::default(),
                     )];
-                    let wrapped = wrap_spans(&spans, wrap_width, &prefix, &prefix);
+                    let wrapped = wrap_spans(&spans, wrap_width, &prefix, &prefix, false);
                     for line_spans in wrapped {
                         let content = spans_to_string(&line_spans);
                         lines.push(RenderedLine::with_spans(
@@ -1604,7 +1641,7 @@ fn allocate_column_widths(natural: &[usize], minimum: &[usize], max_width: usize
 /// still wider than the column. Always returns at least one (possibly empty) line.
 fn wrap_cell_spans(spans: &[InlineSpan], width: usize) -> Vec<Vec<InlineSpan>> {
     let mut out = Vec::new();
-    for mut line in wrap_spans(spans, width, "", "") {
+    for mut line in wrap_spans(spans, width, "", "", false) {
         while line
             .last()
             .is_some_and(|span| span.text().chars().all(char::is_whitespace))
@@ -2093,6 +2130,7 @@ fn wrap_spans(
     width: usize,
     prefix_first: &str,
     prefix_next: &str,
+    first_prefix_is_list_marker: bool,
 ) -> Vec<Vec<InlineSpan>> {
     let mut tokens: Vec<InlineSpan> = Vec::new();
     for span in spans {
@@ -2107,6 +2145,7 @@ fn wrap_spans(
     let mut pending_soft_wrap = false;
 
     let start_new_line = |prefix: &str,
+                          list_marker: bool,
                           current: &mut Vec<InlineSpan>,
                           current_len: &mut usize,
                           has_word: &mut bool| {
@@ -2114,20 +2153,38 @@ fn wrap_spans(
         if prefix.is_empty() {
             *current_len = 0;
         } else {
-            current.push(InlineSpan::new(prefix.to_string(), InlineStyle::default()));
+            current.push(InlineSpan::new(
+                prefix.to_string(),
+                InlineStyle {
+                    list_marker,
+                    ..InlineStyle::default()
+                },
+            ));
             *current_len = UnicodeWidthStr::width(prefix);
         }
         *has_word = false;
     };
 
-    start_new_line(prefix_first, &mut current, &mut current_len, &mut has_word);
+    start_new_line(
+        prefix_first,
+        first_prefix_is_list_marker,
+        &mut current,
+        &mut current_len,
+        &mut has_word,
+    );
 
     for token in tokens {
         if token.text() == HARD_BREAK {
             if !pending_soft_wrap {
                 lines.push(std::mem::take(&mut current));
             }
-            start_new_line(prefix_next, &mut current, &mut current_len, &mut has_word);
+            start_new_line(
+                prefix_next,
+                false,
+                &mut current,
+                &mut current_len,
+                &mut has_word,
+            );
             pending_soft_wrap = false;
             continue;
         }
@@ -2136,7 +2193,13 @@ fn wrap_spans(
 
         if current_len + token_len > width && has_word {
             lines.push(current.clone());
-            start_new_line(prefix_next, &mut current, &mut current_len, &mut has_word);
+            start_new_line(
+                prefix_next,
+                false,
+                &mut current,
+                &mut current_len,
+                &mut has_word,
+            );
             pending_soft_wrap = true;
         }
 
@@ -2157,7 +2220,10 @@ fn wrap_spans(
     if current.is_empty() && !prefix_first.is_empty() {
         current.push(InlineSpan::new(
             prefix_first.to_string(),
-            InlineStyle::default(),
+            InlineStyle {
+                list_marker: first_prefix_is_list_marker,
+                ..InlineStyle::default()
+            },
         ));
     }
 
@@ -2706,6 +2772,61 @@ fn emit_html_image<S: BuildHasher>(ctx: &mut ParseContext<'_, S>, src: &str, alt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_and_block_code_keep_distinct_semantics_after_highlighting() {
+        let mut doc = parse("`same text`\n\n```text\nsame text\n```").unwrap();
+        for highlighted in [false, true] {
+            if highlighted {
+                doc.ensure_highlight_for_range(0..doc.line_count());
+            }
+            let lines = doc.visible_lines(0, doc.line_count());
+            let inline = lines
+                .iter()
+                .filter(|line| matches!(line.line_type(), LineType::Paragraph))
+                .flat_map(|line| line.spans().unwrap_or_default())
+                .find(|span| span.style().code)
+                .expect("inline raw code");
+            assert!(!inline.style().code_block);
+            let block = lines
+                .iter()
+                .filter(|line| matches!(line.line_type(), LineType::CodeBlock))
+                .flat_map(|line| line.spans().unwrap_or_default())
+                .find(|span| span.style().code)
+                .expect("block raw code");
+            assert!(block.style().code_block);
+            assert!(!block.style().strong);
+            assert!(!block.style().code_frame);
+        }
+    }
+
+    #[test]
+    fn list_marker_metadata_does_not_emphasize_body_or_continuations() {
+        for marker in ["-", "1.", "- [x]", "- [ ]"] {
+            let doc = Document::parse_with_layout(
+                &format!("{marker} normal body wraps onto another line"),
+                20,
+            )
+            .unwrap();
+            let lines = doc.visible_lines(0, doc.line_count());
+            let list_lines: Vec<_> = lines
+                .iter()
+                .filter(|line| matches!(line.line_type(), LineType::ListItem(_)))
+                .collect();
+            assert!(list_lines.len() > 1);
+            let first_spans = list_lines[0].spans().unwrap();
+            assert!(first_spans[0].style().list_marker);
+            for span in first_spans.iter().skip(1).chain(
+                list_lines
+                    .iter()
+                    .skip(1)
+                    .flat_map(|line| line.spans().unwrap_or_default()),
+            ) {
+                assert!(!span.style().list_marker);
+                assert!(!span.style().strong);
+            }
+        }
+    }
 
     #[test]
     fn test_parse_empty_document() {

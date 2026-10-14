@@ -12,8 +12,8 @@ pub fn render_hover_link_bar(model: &Model, frame: &mut Frame, area: Rect) {
     let bar = Paragraph::new(format!("link: {url}")).style(themed_style(
         Style::default().bg(Color::Blue).fg(Color::White),
         Style::default()
-            .bg(tokyo_night::BLUE)
-            .fg(tokyo_night::DARK_BG),
+            .bg(tokyo_night::DARK_BG)
+            .fg(tokyo_night::CYAN),
     ));
     frame.render_widget(bar, area);
 }
@@ -37,8 +37,8 @@ pub fn render_search_bar(model: &Model, frame: &mut Frame, area: Rect) {
             .bg(Color::Rgb(30, 58, 95))
             .fg(Color::Rgb(255, 255, 255)),
         Style::default()
-            .bg(tokyo_night::LIGHTER_BG)
-            .fg(tokyo_night::BRIGHT_FG),
+            .bg(tokyo_night::DARK_BG)
+            .fg(tokyo_night::FG),
     ));
     frame.render_widget(bar, area);
 }
@@ -70,7 +70,7 @@ pub fn render_status_bar(model: &Model, frame: &mut Frame, area: Rect) {
         Style::default().bg(Color::DarkGray).fg(Color::White),
         Style::default()
             .bg(tokyo_night::DARK_BG)
-            .fg(tokyo_night::FG),
+            .fg(tokyo_night::DARK_FG),
     ));
 
     frame.render_widget(status_bar, area);
@@ -85,27 +85,21 @@ pub fn render_toast_bar(model: &Model, frame: &mut Frame, area: Rect) {
             "[info]",
             themed_style(
                 Style::default().bg(Color::DarkGray).fg(Color::White),
-                Style::default()
-                    .bg(tokyo_night::LIGHTER_BG)
-                    .fg(tokyo_night::FG),
+                Style::default().bg(tokyo_night::BG).fg(tokyo_night::INFO),
             ),
         ),
         crate::app::ToastLevel::Warning => (
             "[warn]",
             themed_style(
                 Style::default().bg(Color::Yellow).fg(Color::Black),
-                Style::default()
-                    .bg(tokyo_night::YELLOW)
-                    .fg(tokyo_night::DARK_BG),
+                Style::default().bg(tokyo_night::BG).fg(tokyo_night::YELLOW),
             ),
         ),
         crate::app::ToastLevel::Error => (
             "[error]",
             themed_style(
                 Style::default().bg(Color::Red).fg(Color::White),
-                Style::default()
-                    .bg(tokyo_night::RED)
-                    .fg(tokyo_night::DARK_BG),
+                Style::default().bg(tokyo_night::BG).fg(tokyo_night::ERROR),
             ),
         ),
     };

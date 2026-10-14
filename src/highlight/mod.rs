@@ -5,7 +5,9 @@
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color, StyleModifier, Theme, ThemeItem, ThemeSet, ThemeSettings};
+use syntect::highlighting::{
+    Color, FontStyle, StyleModifier, Theme, ThemeItem, ThemeSet, ThemeSettings,
+};
 use syntect::parsing::SyntaxSet;
 
 use crate::document::{InlineColor, InlineSpan, InlineStyle};
@@ -35,11 +37,14 @@ mod tests {
     }
 
     #[test]
-    fn test_highlight_plain_code_sets_code_style() {
-        let code = "plain";
-        let lines = highlight_code(None, code);
-        let spans = &lines[0];
-        assert!(spans.iter().all(|span| span.style().code));
+    fn test_highlight_plain_code_sets_block_code_style() {
+        for language in [None, Some("nope")] {
+            let lines = highlight_code(language, "plain");
+            assert!(lines[0].iter().all(|span| {
+                let style = span.style();
+                style.code && style.code_block && !style.strong && !style.emphasis
+            }));
+        }
     }
 
     #[test]
@@ -150,13 +155,13 @@ mod tests {
             )
             .unwrap();
         for (token, expected) in [
-            ("fn", (0xad, 0x8e, 0xe6)),
-            ("main", (0x7a, 0xa2, 0xf7)),
-            ("u32", (0xe0, 0xaf, 0x68)),
-            ("42", (0xeb, 0x92, 0x7b)),
-            ("hello", (0x9e, 0xce, 0x6a)),
-            ("=", (0x44, 0x9d, 0xab)),
-            ("comment", (0x56, 0x5f, 0x89)),
+            ("fn", (0xc0, 0x99, 0xff)),
+            ("main", (0x82, 0xaa, 0xff)),
+            ("u32", (0x65, 0xbc, 0xff)),
+            ("42", (0xff, 0x96, 0x6c)),
+            ("hello", (0xc3, 0xe8, 0x8d)),
+            ("=", (0x89, 0xdd, 0xff)),
+            ("comment", (0x63, 0x6d, 0xa6)),
         ] {
             let (style, _) = ranges
                 .iter()
@@ -167,6 +172,102 @@ mod tests {
                 expected,
                 "Unexpected Tokyo Night color for {token}"
             );
+            assert_eq!(
+                style.font_style.contains(FontStyle::ITALIC),
+                token == "comment",
+                "Unexpected Tokyo Night font style for {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_moon_semantic_scope_colors_and_font_styles() {
+        use syntect::highlighting::Highlighter;
+        use syntect::parsing::Scope;
+
+        let highlighter = Highlighter::new(theme_for_mode(BackgroundMode::Dark));
+        for (scope, expected, italic) in [
+            ("keyword.other.rust", (0xfc, 0xa7, 0xea), true),
+            ("storage.modifier.rust", (0xfc, 0xa7, 0xea), true),
+            ("keyword.control.rust", (0xc0, 0x99, 0xff), false),
+            ("storage.type.function.rust", (0xc0, 0x99, 0xff), false),
+            ("entity.name.function.rust", (0x82, 0xaa, 0xff), false),
+            ("entity.name.type.rust", (0x65, 0xbc, 0xff), false),
+            ("storage.type.rust", (0x65, 0xbc, 0xff), false),
+            ("variable.parameter.rust", (0xff, 0xc7, 0x77), false),
+            ("string.quoted.double.rust", (0xc3, 0xe8, 0x8d), false),
+            ("comment.line.double-slash.rust", (0x63, 0x6d, 0xa6), true),
+            ("constant.numeric.rust", (0xff, 0x96, 0x6c), false),
+            ("constant.other.rust", (0xff, 0x96, 0x6c), false),
+            ("keyword.operator.rust", (0x89, 0xdd, 0xff), false),
+            (
+                "punctuation.section.parens.begin.rust",
+                (0x82, 0x8b, 0xb8),
+                false,
+            ),
+            ("punctuation.separator.rust", (0x89, 0xdd, 0xff), false),
+            ("constant.character.escape.rust", (0xc0, 0x99, 0xff), false),
+            ("keyword.control.import.rust", (0x86, 0xe1, 0xfc), false),
+            ("entity.name.namespace.rust", (0x86, 0xe1, 0xfc), false),
+            ("variable.other.member.rust", (0x4f, 0xd6, 0xbe), false),
+            ("variable.other.rust", (0xc8, 0xd3, 0xf5), false),
+            ("variable.language.rust", (0xff, 0x75, 0x7f), false),
+            ("invalid.illegal.rust", (0xc5, 0x3b, 0x53), false),
+        ] {
+            let style = highlighter.style_for_stack(&[Scope::new(scope).unwrap()]);
+            assert_eq!(
+                (style.foreground.r, style.foreground.g, style.foreground.b),
+                expected,
+                "Unexpected Moon color for {scope}"
+            );
+            assert_eq!(
+                style.font_style.contains(FontStyle::ITALIC),
+                italic,
+                "Unexpected Moon italic style for {scope}"
+            );
+            assert!(!style.font_style.contains(FontStyle::BOLD));
+        }
+    }
+
+    #[test]
+    fn test_highlight_preserves_block_and_comment_metadata() {
+        let lines = highlight_code_for_mode(
+            Some("rust"),
+            "// comment\nfn main() {}\n",
+            BackgroundMode::Dark,
+        );
+        assert!(lines.iter().flatten().all(|span| span.style().code_block));
+        assert!(lines[0].iter().all(|span| span.style().emphasis));
+        assert!(lines.iter().flatten().all(|span| !span.style().strong));
+    }
+
+    #[test]
+    fn test_light_mode_preserves_existing_color_conversion() {
+        let code = "fn main() {} // comment\n";
+        let syntax_set = syntax_set();
+        let syntax = syntax_set.find_syntax_by_token("rust").unwrap();
+        let mut highlighter = HighlightLines::new(syntax, theme_for_mode(BackgroundMode::Light));
+        let expected = highlighter.highlight_line(code, syntax_set).unwrap();
+        let lines = highlight_code_for_mode(Some("rust"), code, BackgroundMode::Light);
+        let expected: Vec<_> = expected
+            .into_iter()
+            .filter(|(_, text)| !text.trim_end_matches('\n').is_empty())
+            .collect();
+        assert_eq!(lines[0].len(), expected.len());
+        for (span, (style, text)) in lines[0].iter().zip(expected) {
+            assert_eq!(span.text(), text.trim_end_matches('\n'));
+            assert_eq!(
+                span.style().fg,
+                Some(adjust_fg_for_background(
+                    InlineColor {
+                        r: style.foreground.r,
+                        g: style.foreground.g,
+                        b: style.foreground.b,
+                    },
+                    BackgroundMode::Light,
+                ))
+            );
+            assert!(!span.style().emphasis && !span.style().strong);
         }
     }
 
@@ -174,14 +275,14 @@ mod tests {
     fn test_dark_mode_preserves_palette_colors() {
         for color in [
             InlineColor {
-                r: 0x56,
-                g: 0x5f,
-                b: 0x89,
+                r: 0x63,
+                g: 0x6d,
+                b: 0xa6,
             },
             InlineColor {
-                r: 0x9e,
-                g: 0xce,
-                b: 0x6a,
+                r: 0xc3,
+                g: 0xe8,
+                b: 0x8d,
             },
         ] {
             assert_eq!(adjust_fg_for_background(color, BackgroundMode::Dark), color);
@@ -192,7 +293,7 @@ mod tests {
     fn test_theme_selection_tracks_background_mode() {
         let dark = theme_for_mode(BackgroundMode::Dark);
         let light = theme_for_mode(BackgroundMode::Light);
-        assert_eq!(dark.name.as_deref(), Some("Omarchy Tokyo Night"));
+        assert_eq!(dark.name.as_deref(), Some("Tokyo Night Moon"));
         assert_ne!(light.name, dark.name);
         assert!(std::ptr::eq(dark, theme_for_mode(BackgroundMode::Dark)));
         assert!(std::ptr::eq(light, theme_for_mode(BackgroundMode::Light)));
@@ -243,9 +344,16 @@ fn leak_str(s: &str) -> &'static str {
 }
 
 pub fn highlight_code(language: Option<&str>, code: &str) -> Vec<Vec<InlineSpan>> {
+    highlight_code_for_mode(language, code, background_mode())
+}
+
+fn highlight_code_for_mode(
+    language: Option<&str>,
+    code: &str,
+    mode: BackgroundMode,
+) -> Vec<Vec<InlineSpan>> {
     let mut lines = Vec::new();
     let syntax_set = syntax_set();
-    let mode = background_mode();
     let syntax = language
         .and_then(|lang| syntax_set.find_syntax_by_token(lang))
         .or_else(|| language.and_then(|lang| syntax_set.find_syntax_by_name(lang)));
@@ -254,6 +362,7 @@ pub fn highlight_code(language: Option<&str>, code: &str) -> Vec<Vec<InlineSpan>
         for line in code.lines() {
             let style = InlineStyle {
                 code: true,
+                code_block: true,
                 ..InlineStyle::default()
             };
             lines.push(vec![InlineSpan::new(line.to_string(), style)]);
@@ -282,6 +391,10 @@ pub fn highlight_code(language: Option<&str>, code: &str) -> Vec<Vec<InlineSpan>
             }
             let mut inline_style = InlineStyle {
                 code: true,
+                code_block: true,
+                emphasis: mode == BackgroundMode::Dark
+                    && style.font_style.contains(FontStyle::ITALIC),
+                strong: mode == BackgroundMode::Dark && style.font_style.contains(FontStyle::BOLD),
                 ..InlineStyle::default()
             };
             let fg = InlineColor {
@@ -330,8 +443,8 @@ fn theme_for_mode(mode: BackgroundMode) -> &'static Theme {
 }
 
 fn tokyo_night_theme() -> Theme {
-    // Omarchy Tokyo Night palette, applied to semantic TextMate scopes rather
-    // than transforming the colors of an unrelated bundled theme.
+    // Match the effective Neovim Tokyo Night Moon groups using TextMate scopes.
+    // The shared UI palette is the only source of RGB values.
     use crate::ui::style::tokyo_night;
 
     let rgb = |color| {
@@ -341,30 +454,85 @@ fn tokyo_night_theme() -> Theme {
         Color { r, g, b, a: 255 }
     };
     let scopes = [
-        ("comment", rgb(tokyo_night::DARK_FG)),
-        ("keyword, storage", rgb(tokyo_night::MAGENTA)),
-        ("string", rgb(tokyo_night::GREEN)),
-        ("entity.name.function, support.function", rgb(tokyo_night::BLUE)),
-        ("entity.name.type, entity.name.class, entity.name.namespace, support.type, support.class", rgb(tokyo_night::YELLOW)),
-        ("storage.type", rgb(tokyo_night::YELLOW)),
-        ("storage.type.function", rgb(tokyo_night::MAGENTA)),
-        ("constant.numeric, constant.language", rgb(tokyo_night::ORANGE)),
-        ("keyword.operator", rgb(tokyo_night::CYAN)),
-        ("constant.character.escape", rgb(tokyo_night::BRIGHT_MAGENTA)),
-        ("entity.name.tag, invalid", rgb(tokyo_night::RED)),
-        ("entity.other.attribute-name", rgb(tokyo_night::YELLOW)),
+        ("comment", tokyo_night::COMMENT, FontStyle::ITALIC),
+        ("keyword, storage", tokyo_night::PURPLE, FontStyle::ITALIC),
+        (
+            "keyword.control, storage.type.function",
+            tokyo_night::MAGENTA,
+            FontStyle::empty(),
+        ),
+        (
+            "keyword.control.import, keyword.control.include, entity.name.namespace",
+            tokyo_night::BRIGHT_CYAN,
+            FontStyle::empty(),
+        ),
+        (
+            "string, constant.character",
+            tokyo_night::GREEN,
+            FontStyle::empty(),
+        ),
+        (
+            "entity.name.function, support.function",
+            tokyo_night::BLUE,
+            FontStyle::empty(),
+        ),
+        (
+            "entity.name.type, entity.name.class, support.type, support.class, storage.type",
+            tokyo_night::BLUE1,
+            FontStyle::empty(),
+        ),
+        ("variable.parameter", tokyo_night::YELLOW, FontStyle::empty()),
+        ("constant", tokyo_night::ORANGE, FontStyle::empty()),
+        (
+            "keyword.operator, punctuation",
+            tokyo_night::OPERATOR,
+            FontStyle::empty(),
+        ),
+        (
+            "punctuation.section, punctuation.definition.brackets, punctuation.definition.array, punctuation.definition.parameters, punctuation.definition.arguments",
+            tokyo_night::DARK_FG,
+            FontStyle::empty(),
+        ),
+        (
+            "punctuation.definition.string",
+            tokyo_night::GREEN,
+            FontStyle::empty(),
+        ),
+        (
+            "punctuation.definition.comment",
+            tokyo_night::COMMENT,
+            FontStyle::ITALIC,
+        ),
+        (
+            "constant.character.escape",
+            tokyo_night::MAGENTA,
+            FontStyle::empty(),
+        ),
+        (
+            "entity.name.tag, entity.name.label",
+            tokyo_night::BLUE,
+            FontStyle::empty(),
+        ),
+        ("variable.language", tokyo_night::RED, FontStyle::empty()),
+        (
+            "entity.other.attribute-name, variable.other.member",
+            tokyo_night::CYAN,
+            FontStyle::empty(),
+        ),
+        ("invalid", tokyo_night::ERROR, FontStyle::empty()),
     ]
     .into_iter()
-    .map(|(scope, foreground)| ThemeItem {
-        scope: scope.parse().expect("valid Tokyo Night scope selector"),
+    .map(|(scope, foreground, font_style)| ThemeItem {
+        scope: scope.parse().expect("valid Tokyo Night Moon scope selector"),
         style: StyleModifier {
-            foreground: Some(foreground),
+            foreground: Some(rgb(foreground)),
+            font_style: Some(font_style),
             ..StyleModifier::default()
         },
     })
     .collect();
     Theme {
-        name: Some("Omarchy Tokyo Night".to_string()),
+        name: Some("Tokyo Night Moon".to_string()),
         settings: ThemeSettings {
             foreground: Some(rgb(tokyo_night::FG)),
             background: Some(rgb(tokyo_night::BG)),

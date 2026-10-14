@@ -411,6 +411,7 @@ impl App {
                 resize_debouncer.is_pending() || browse_debouncer.is_pending(),
             );
             if event::poll(Duration::from_millis(poll_ms))? {
+                let batch_started = Instant::now();
                 // Refresh timestamp after poll wait so debouncers use accurate times.
                 let event_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let incoming = event::read()?;
@@ -442,11 +443,14 @@ impl App {
                     needs_render = true;
                 }
 
-                // Coalesce key repeat bursts into a single render. The 5ms
-                // timeout (rather than 0) gives split escape sequences time
-                // to reassemble — see `select_poll_ms` for details.
+                // Bound event coalescing to one frame so sustained key repeats
+                // cannot starve drawing. Keep the 5ms poll for split escape
+                // sequences — see `select_poll_ms` for details.
                 let mut drained = 0_u32;
-                while event::poll(Duration::from_millis(5))? {
+                while batch_started.elapsed() < Duration::from_millis(16)
+                    && !model.should_quit
+                    && event::poll(Duration::from_millis(5))?
+                {
                     let drain_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     let incoming = event::read()?;
                     let msg = if super::ime::prepare_event(ime, &incoming, model) {

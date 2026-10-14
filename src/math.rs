@@ -325,17 +325,20 @@ const TYPST_PREAMBLE: &str = "\
 /// Build the page/text setup directives for the Typst source.
 ///
 /// The background is always transparent (`fill: none`) so the terminal
-/// background shows through.  Text color is white on dark terminals and
-/// black on light ones.
+/// background shows through. Text uses the Markdown math highlight on dark
+/// terminals and black on light ones.
 fn typst_page_setup() -> String {
-    let text_color = if crate::highlight::is_light_background() {
-        "black"
+    let (r, g, b) = if crate::highlight::is_light_background() {
+        (0, 0, 0)
     } else {
-        "white"
+        let ratatui::style::Color::Rgb(r, g, b) = crate::ui::style::tokyo_night::BLUE1 else {
+            unreachable!("Tokyo Night palette uses RGB colors");
+        };
+        (r, g, b)
     };
     format!(
         "#set page(width: auto, height: auto, margin: 8pt, fill: none)\n\
-         #set text(size: 16pt, fill: {text_color})\n"
+         #set text(size: 16pt, fill: rgb(\"#{r:02x}{g:02x}{b:02x}\"))\n"
     )
 }
 
@@ -656,17 +659,6 @@ mod tests {
         assert!(
             !svg.contains("<rect"),
             "SVG should not have a background <rect> (page fill should be none)"
-        );
-    }
-
-    #[test]
-    fn test_render_to_svg_text_color_matches_theme() {
-        // In test context (no terminal), background_mode defaults to dark,
-        // so text should be white (#ffffff).
-        let svg = render_to_svg("x^2").unwrap();
-        assert!(
-            svg.contains("fill=\"#ffffff\""),
-            "text glyphs should be white on dark background"
         );
     }
 

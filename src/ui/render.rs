@@ -123,7 +123,10 @@ fn render_heading_toc(model: &Model, frame: &mut Frame, area: Rect) {
             };
             let base_style = super::style::style_for_line_type(&LineType::Heading(h.level));
             let style = if model.toc_selected == Some(i) {
-                themed_style(base_style.reversed(), base_style.bg(tokyo_night::SELECTION))
+                themed_style(
+                    base_style.reversed(),
+                    base_style.bg(tokyo_night::POPUP_SELECTION),
+                )
             } else {
                 base_style
             };
@@ -136,7 +139,7 @@ fn render_heading_toc(model: &Model, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .style(content_style())
         .border_style(if model.toc_focused {
-            Style::default().fg(themed_color(Color::Yellow, tokyo_night::YELLOW))
+            Style::default().fg(themed_color(Color::Yellow, tokyo_night::FLOAT_BORDER))
         } else {
             themed_style(Style::default(), Style::default().fg(tokyo_night::MUTED))
         });
@@ -172,13 +175,13 @@ fn render_browse_toc(model: &Model, frame: &mut Frame, area: Rect) {
             };
             let style = if entry.is_dir {
                 Style::default()
-                    .fg(themed_color(Color::Cyan, tokyo_night::BRIGHT_CYAN))
+                    .fg(themed_color(Color::Cyan, tokyo_night::BLUE))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
             let style = if model.toc_selected == Some(i) {
-                themed_style(style.reversed(), style.bg(tokyo_night::SELECTION))
+                themed_style(style.reversed(), style.bg(tokyo_night::POPUP_SELECTION))
             } else {
                 style
             };
@@ -196,7 +199,7 @@ fn render_browse_toc(model: &Model, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .style(content_style())
         .border_style(if model.toc_focused {
-            Style::default().fg(themed_color(Color::Yellow, tokyo_night::YELLOW))
+            Style::default().fg(themed_color(Color::Yellow, tokyo_night::FLOAT_BORDER))
         } else {
             themed_style(Style::default(), Style::default().fg(tokyo_night::MUTED))
         });
@@ -368,7 +371,16 @@ fn render_editor(model: &Model, frame: &mut Frame, area: Rect) {
 
         let mut spans = vec![Span::styled(
             line_num,
-            Style::default().fg(themed_color(Color::DarkGray, tokyo_night::DARK_FG)),
+            if line_idx == cursor.line {
+                themed_style(
+                    Style::default().fg(Color::DarkGray),
+                    Style::default()
+                        .fg(tokyo_night::ORANGE)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Style::default().fg(themed_color(Color::DarkGray, tokyo_night::MUTED))
+            },
         )];
 
         if line_idx == cursor.line {
@@ -460,8 +472,8 @@ fn render_editor_status_bar(model: &Model, frame: &mut Frame, area: Rect) {
     let status_bar = Paragraph::new(status).style(themed_style(
         Style::default().bg(Color::Magenta).fg(Color::White),
         Style::default()
-            .bg(tokyo_night::MAGENTA)
-            .fg(tokyo_night::DARK_BG),
+            .bg(tokyo_night::DARK_BG)
+            .fg(tokyo_night::DARK_FG),
     ));
 
     frame.render_widget(status_bar, area);
@@ -510,8 +522,8 @@ fn highlight_spans(spans: &[Span<'_>], query: &str) -> Vec<Span<'static>> {
             out.push(Span::styled(
                 text[start..end].to_string(),
                 span.style
-                    .bg(themed_color(Color::Yellow, tokyo_night::YELLOW))
-                    .fg(themed_color(Color::Black, tokyo_night::DARK_BG)),
+                    .bg(themed_color(Color::Yellow, tokyo_night::SEARCH))
+                    .fg(themed_color(Color::Black, tokyo_night::FG)),
             ));
             cursor = end;
         }

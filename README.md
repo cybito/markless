@@ -69,7 +69,7 @@ When given a directory, markless opens in browse mode: the sidebar shows the fil
 - `--image-mode <kitty|sixel|iterm2|halfblock>`  Force a specific image rendering protocol
 - `--force-half-cell`  Force half-cell image rendering (shortcut for `--image-mode halfblock`)
 - `--wrap-width <COLS>`  Maximum content width for word-wrapping
-- `--theme <auto|light|dark>`  选择浅色或 Omarchy Tokyo Night 深色配色（`auto` 通过 OSC 11 查询终端背景色）
+- `--theme <auto|light|dark>`  选择浅色或 Neovim Tokyo Night Moon 深色配色（`auto` 通过 OSC 11 查询终端背景色）
 - `--no-inline-math`  Render inline math as images instead of Unicode text
 - `--inline-math`  Re-enable inline Unicode math (overrides saved `--no-inline-math`)
 - `--perf`  Enable startup performance logging
@@ -83,9 +83,13 @@ Config files:
 - Global (macOS): `~/Library/Application Support/markless/config`
 - Local override: `.marklessrc` in the current directory
 
-### Tokyo Night 配色
+### Neovim Tokyo Night Moon 配色
 
-深色模式的 Markdown、界面和代码高亮使用 [Omarchy Tokyo Night 官方色板](https://github.com/basecamp/omarchy/blob/master/themes/tokyo-night/colors.toml)，背景为 `#1a1b26`，正文为 `#a9b1d6`。显式指定的文档内联颜色保留；浅色模式保持原有配色。图片、Mermaid 图和公式图片不重新着色。
+深色模式移植本机 Neovim 实际使用的 `tokyonight-moon` 高亮规则，来源为 [tokyonight.nvim Moon 色板](https://github.com/folke/tokyonight.nvim/blob/cdc07ac78467a233fd62c493de29a17e0cf2b2b6/lua/tokyonight/colors/moon.lua)及 [Tree-sitter Markdown 高亮](https://github.com/folke/tokyonight.nvim/blob/cdc07ac78467a233fd62c493de29a17e0cf2b2b6/lua/tokyonight/groups/treesitter.lua)，不再使用 Omarchy Night 色板。背景为 `#222436`，正文为 `#c8d3f5`。
+
+覆盖六级标题及其淡色背景、行内代码、普通代码块、链接、列表标记、引用、分隔线、公式、代码语法高亮，以及目录、弹窗、状态栏、搜索、选区、编辑器和提示信息。行内代码保留 Neovim 的蓝字 `#82aaff`，不强制加粗；背景从 Neovim 的 `#444a73` 加深为 Moon `bg_dark1` `#191b29`，以提高可读性（对比度约 3.7 → 7.4）。普通代码块为绿字，不再套用行内代码样式；边框和语言标签统一为低强调色 `#3b4261`。代码高亮按 Neovim 的语义角色映射到 syntect，解析器不同，因此具体 token 边界可能不同。
+
+Mermaid 图和公式图片使用同一色板；原始图片像素不修改。显式指定的文档内联颜色保留，浅色模式保留原有规则。代码块几何布局不模仿 Neovim；中文按显示列宽截断和补齐，延迟高亮后右边框仍对齐，复制原始代码不受影响。
 
 ```sh
 cargo run --release -- --theme dark README.md
@@ -94,7 +98,7 @@ cargo run --release -- --theme dark README.md
 ## Key Bindings
 
 Navigation
-- `j` / `k` or arrows: scroll
+- `j` / `k` 或方向键：逐行滚动；长按期间持续刷新，不等待按键输入停止。输入合并窗口限制为 16ms，保留终端分片转义序列的拼接等待。
 - `Space` / `PageDown`: page down
 - `b` / `PageUp`: page up
 - `d` / `u`: half page

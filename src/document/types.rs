@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Result of parsing markdown, ready to be assembled into a `Document`.
 #[derive(Debug, Clone, Default)]
@@ -369,17 +370,26 @@ impl Document {
                 if line_idx >= self.lines.len() {
                     break;
                 }
-                let trimmed_spans = truncate_spans_to_chars(&spans, block.content_width);
-                let trimmed_len = spans_char_len(&trimmed_spans);
+                let trimmed_spans = truncate_spans_by_display_width(&spans, block.content_width);
+                let trimmed_len = spans_display_width(&trimmed_spans);
                 let padding = " "
                     .repeat(block.content_width.saturating_sub(trimmed_len) + block.right_padding);
 
                 let mut line_spans = Vec::new();
-                line_spans.push(InlineSpan::new("│ ".to_string(), InlineStyle::default()));
+                line_spans.push(InlineSpan::new(
+                    "│ ".to_string(),
+                    InlineStyle {
+                        code_frame: true,
+                        ..InlineStyle::default()
+                    },
+                ));
                 line_spans.extend(trimmed_spans);
                 line_spans.push(InlineSpan::new(
                     format!("{padding} │"),
-                    InlineStyle::default(),
+                    InlineStyle {
+                        code_frame: true,
+                        ..InlineStyle::default()
+                    },
                 ));
                 let content = spans_to_string(&line_spans);
                 self.lines[line_idx] =
@@ -473,6 +483,12 @@ pub struct InlineStyle {
     pub emphasis: bool,
     pub strong: bool,
     pub code: bool,
+    /// Block code content, distinct from inline raw code.
+    pub code_block: bool,
+    /// A generated list bullet, number, or task checkbox, not list body text.
+    pub list_marker: bool,
+    /// Decorative code frame, distinct from code content.
+    pub code_frame: bool,
     pub strikethrough: bool,
     pub link: bool,
     pub math: bool,
@@ -577,8 +593,8 @@ fn spans_to_string(spans: &[InlineSpan]) -> String {
     content
 }
 
-fn spans_char_len(spans: &[InlineSpan]) -> usize {
-    spans.iter().map(|s| s.text().chars().count()).sum()
+fn spans_display_width(spans: &[InlineSpan]) -> usize {
+    spans.iter().map(|s| s.text().width()).sum()
 }
 
 fn normalize_anchor(s: &str) -> String {
@@ -597,7 +613,7 @@ fn normalize_anchor(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn truncate_spans_to_chars(spans: &[InlineSpan], max_len: usize) -> Vec<InlineSpan> {
+fn truncate_spans_by_display_width(spans: &[InlineSpan], max_len: usize) -> Vec<InlineSpan> {
     let mut out = Vec::new();
     let mut remaining = max_len;
     for span in spans {
@@ -605,11 +621,19 @@ fn truncate_spans_to_chars(spans: &[InlineSpan], max_len: usize) -> Vec<InlineSp
             break;
         }
         let mut taken = String::new();
-        for ch in span.text().chars().take(remaining) {
+        let mut count = 0;
+        for ch in span.text().chars() {
+            let width = ch.width().unwrap_or(0);
+            if count + width > remaining {
+                if !taken.is_empty() {
+                    out.push(InlineSpan::new(taken, span.style()));
+                }
+                return out;
+            }
             taken.push(ch);
+            count += width;
         }
-        let count = taken.chars().count();
-        if count > 0 {
+        if !taken.is_empty() {
             out.push(InlineSpan::new(taken, span.style()));
             remaining -= count;
         }
@@ -775,5 +799,32 @@ mod tests {
         assert!(doc.is_hex_mode());
         // line_count should be stable
         assert_eq!(doc.line_count(), 5); // 4 header + 1 hex
+    }
+}
+
+#[cfg(test)]
+mod frame_regressions {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn code_frame_alignment_survives_lazy_highlighting() {
+        for language in ["rust", "text"] {
+            for width in [80, 16] {
+                let source =
+                    format!("```{language}\n// 中文注释\nlet 中文 = \"你好世界\";\nx\n```");
+                let mut doc = Document::parse_with_layout(&source, width).unwrap();
+                doc.ensure_highlight_for_range(0..doc.line_count());
+                let block = &doc.code_blocks[0];
+                let frame_width = doc.lines[block.line_range.start - 1].content().width();
+                for index in block.line_range.clone() {
+                    assert_eq!(doc.lines[index].content().width(), frame_width);
+                }
+                assert_eq!(
+                    doc.code_block_raw_line(block.line_range.start + 1),
+                    Some("let 中文 = \"你好世界\";")
+                );
+            }
+        }
     }
 }

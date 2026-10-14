@@ -9,7 +9,7 @@ fn popup_style() -> Style {
     themed_style(
         Style::default().bg(Color::Black).fg(Color::White),
         Style::default()
-            .bg(tokyo_night::LIGHTER_BG)
+            .bg(tokyo_night::DARK_BG)
             .fg(tokyo_night::FG),
     )
 }
@@ -62,7 +62,9 @@ pub fn render_link_picker_overlay(model: &Model, frame: &mut Frame, area: Rect) 
             Span::raw("   "),
             Span::styled(
                 link.url.clone(),
-                Style::default().fg(themed_color(Color::Cyan, tokyo_night::CYAN)),
+                Style::default()
+                    .fg(themed_color(Color::Cyan, tokyo_night::CYAN))
+                    .add_modifier(Modifier::UNDERLINED),
             ),
         ]));
     }
@@ -79,6 +81,10 @@ pub fn render_link_picker_overlay(model: &Model, frame: &mut Frame, area: Rect) 
         .title("Open Link")
         .borders(Borders::ALL)
         .padding(Padding::uniform(1))
+        .border_style(themed_style(
+            Style::default(),
+            Style::default().fg(tokyo_night::FLOAT_BORDER),
+        ))
         .style(popup_style());
     frame.render_widget(Clear, popup);
     frame.render_widget(
@@ -185,6 +191,10 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
         .title("Help")
         .borders(Borders::ALL)
         .padding(Padding::uniform(1))
+        .border_style(themed_style(
+            Style::default(),
+            Style::default().fg(tokyo_night::FLOAT_BORDER),
+        ))
         .style(popup_style());
 
     frame.render_widget(Clear, popup);

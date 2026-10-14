@@ -19,11 +19,82 @@ use image::DynamicImage;
 pub fn render_to_svg(mermaid_source: &str) -> Result<String> {
     let mut opts = mermaid_rs_renderer::RenderOptions::default();
     opts.theme.font_family = "Helvetica, Arial, sans-serif".to_string();
+    if !crate::highlight::is_light_background() {
+        use crate::ui::style::tokyo_night as c;
+        let theme = &mut opts.theme;
+        for (field, color) in [
+            (&mut theme.background, c::BG),
+            (&mut theme.primary_color, c::DARK_BG),
+            (&mut theme.primary_text_color, c::FG),
+            (&mut theme.primary_border_color, c::BLUE),
+            (&mut theme.line_color, c::DARK_FG),
+            (&mut theme.secondary_color, c::LIGHTER_BG),
+            (&mut theme.tertiary_color, c::SELECTION),
+            (&mut theme.edge_label_background, c::BG),
+            (&mut theme.cluster_background, c::DARK_BG),
+            (&mut theme.cluster_border, c::MUTED),
+            (&mut theme.sequence_actor_fill, c::DARK_BG),
+            (&mut theme.sequence_actor_border, c::BLUE),
+            (&mut theme.sequence_actor_line, c::MUTED),
+            (&mut theme.sequence_note_fill, c::LIGHTER_BG),
+            (&mut theme.sequence_note_border, c::YELLOW),
+            (&mut theme.sequence_activation_fill, c::SELECTION),
+            (&mut theme.sequence_activation_border, c::BLUE),
+            (&mut theme.text_color, c::FG),
+            (&mut theme.git_commit_label_color, c::FG),
+            (&mut theme.git_commit_label_background, c::DARK_BG),
+            (&mut theme.git_tag_label_color, c::YELLOW),
+            (&mut theme.git_tag_label_background, c::DARK_BG),
+            (&mut theme.git_tag_label_border, c::YELLOW),
+            (&mut theme.pie_title_text_color, c::FG),
+            (&mut theme.pie_section_text_color, c::BG),
+            (&mut theme.pie_legend_text_color, c::FG),
+            (&mut theme.pie_stroke_color, c::BG),
+            (&mut theme.pie_outer_stroke_color, c::MUTED),
+        ] {
+            *field = palette_hex(color);
+        }
+        theme.git_colors = [
+            c::BLUE,
+            c::YELLOW,
+            c::GREEN,
+            c::CYAN,
+            c::MAGENTA,
+            c::ORANGE,
+            c::RED,
+            c::BRIGHT_CYAN,
+        ]
+        .map(palette_hex);
+        theme.git_inv_colors = std::array::from_fn(|_| palette_hex(c::BG));
+        theme.git_branch_label_colors = std::array::from_fn(|_| palette_hex(c::BG));
+        theme.pie_colors = [
+            c::BLUE,
+            c::YELLOW,
+            c::GREEN,
+            c::CYAN,
+            c::MAGENTA,
+            c::ORANGE,
+            c::RED,
+            c::BRIGHT_CYAN,
+            c::BRIGHT_MAGENTA,
+            c::BLUE1,
+            c::DARK_FG,
+            c::FG,
+        ]
+        .map(palette_hex);
+    }
     let svg = catch_unwind(AssertUnwindSafe(|| {
         mermaid_rs_renderer::render_with_options(mermaid_source, opts)
     }))
     .unwrap_or_else(|_| Err(anyhow::anyhow!("mermaid-rs-renderer panicked")))?;
     Ok(fix_svg_font_families(&svg))
+}
+
+fn palette_hex(color: ratatui::style::Color) -> String {
+    let ratatui::style::Color::Rgb(r, g, b) = color else {
+        unreachable!("Tokyo Night palette uses RGB colors");
+    };
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 /// Render a mermaid diagram to a raster image.

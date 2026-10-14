@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long)]
     no_images: bool,
 
-    /// Choose light styling or Omarchy Tokyo Night dark styling (auto detects background)
+    /// Choose light styling or Neovim Tokyo Night Moon dark styling (auto detects background)
     #[arg(long, value_enum, default_value = "auto")]
     theme: ThemeMode,
 
