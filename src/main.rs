@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long)]
     no_images: bool,
 
-    /// Force syntax highlight theme background (light or dark)
+    /// Choose light styling or Omarchy Tokyo Night dark styling (auto detects background)
     #[arg(long, value_enum, default_value = "auto")]
     theme: ThemeMode,
 

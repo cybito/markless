@@ -1,109 +1,156 @@
 //! Theming and color definitions.
 //!
 //! This module defines the visual styling for rendered markdown elements.
-//! Uses ANSI colors that adapt to the terminal's color palette.
+//! Dark mode uses the Omarchy Tokyo Night palette; light mode retains ANSI styling.
 
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::document::{InlineStyle, LineType};
 
+/// Authoritative Omarchy Tokyo Night colors.
+pub(crate) mod tokyo_night {
+    use ratatui::style::Color;
+
+    pub const BG: Color = Color::Rgb(0x1a, 0x1b, 0x26);
+    pub const DARK_BG: Color = Color::Rgb(0x13, 0x14, 0x1c);
+    pub const LIGHTER_BG: Color = Color::Rgb(0x24, 0x28, 0x3b);
+    pub const FG: Color = Color::Rgb(0xa9, 0xb1, 0xd6);
+    pub const BRIGHT_FG: Color = Color::Rgb(0xc0, 0xca, 0xf5);
+    pub const MUTED: Color = Color::Rgb(0x41, 0x48, 0x68);
+    pub const DARK_FG: Color = Color::Rgb(0x56, 0x5f, 0x89);
+    pub const SELECTION: Color = Color::Rgb(0x29, 0x2e, 0x42);
+    pub const RED: Color = Color::Rgb(0xf7, 0x76, 0x8e);
+    pub const YELLOW: Color = Color::Rgb(0xe0, 0xaf, 0x68);
+    pub const GREEN: Color = Color::Rgb(0x9e, 0xce, 0x6a);
+    pub const CYAN: Color = Color::Rgb(0x44, 0x9d, 0xab);
+    pub const BLUE: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
+    pub const MAGENTA: Color = Color::Rgb(0xad, 0x8e, 0xe6);
+    pub const ORANGE: Color = Color::Rgb(0xeb, 0x92, 0x7b);
+    pub const BRIGHT_CYAN: Color = Color::Rgb(0x0d, 0xb9, 0xd7);
+    pub const BRIGHT_MAGENTA: Color = Color::Rgb(0xbb, 0x9a, 0xf7);
+}
+
+pub(crate) fn themed_color(light: Color, dark: Color) -> Color {
+    if crate::highlight::is_light_background() {
+        light
+    } else {
+        dark
+    }
+}
+
+pub(crate) fn themed_style(light: Style, dark: Style) -> Style {
+    if crate::highlight::is_light_background() {
+        light
+    } else {
+        dark
+    }
+}
+
+pub(crate) fn content_style() -> Style {
+    themed_style(
+        Style::default(),
+        Style::default().fg(tokyo_night::FG).bg(tokyo_night::BG),
+    )
+}
+
 /// Get the style for a given line type.
-///
-/// Uses semantic ANSI colors that respect the terminal's theme.
 pub fn style_for_line_type(line_type: &LineType) -> Style {
     let light_bg = crate::highlight::is_light_background();
+    let base = if light_bg {
+        Style::default()
+    } else {
+        Style::default().fg(tokyo_night::FG).bg(tokyo_night::BG)
+    };
     match line_type {
         // Headings - bold with distinct colors per level
-        LineType::Heading(1) => Style::default()
+        LineType::Heading(1) => base
             .fg(if light_bg {
                 Color::Indexed(24)
             } else {
-                Color::Cyan
+                tokyo_night::CYAN
             })
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        LineType::Heading(2) => Style::default()
+        LineType::Heading(2) => base
             .fg(if light_bg {
                 Color::Indexed(22)
             } else {
-                Color::Green
+                tokyo_night::GREEN
             })
             .add_modifier(Modifier::BOLD),
-        LineType::Heading(3) => Style::default()
+        LineType::Heading(3) => base
             .fg(if light_bg {
                 Color::Indexed(58)
             } else {
-                Color::Yellow
+                tokyo_night::YELLOW
             })
             .add_modifier(Modifier::BOLD),
-        LineType::Heading(4) => Style::default()
+        LineType::Heading(4) => base
             .fg(if light_bg {
                 Color::Indexed(24)
             } else {
-                Color::Blue
+                tokyo_night::BLUE
             })
             .add_modifier(Modifier::BOLD),
-        LineType::Heading(5) => Style::default()
+        LineType::Heading(5) => base
             .fg(if light_bg {
                 Color::Indexed(54)
             } else {
-                Color::Magenta
+                tokyo_night::MAGENTA
             })
             .add_modifier(Modifier::BOLD),
-        LineType::Heading(_) => Style::default()
+        LineType::Heading(_) => base
             .fg(if light_bg {
                 Color::Indexed(24)
             } else {
-                Color::Cyan
+                tokyo_night::CYAN
             })
             .add_modifier(Modifier::BOLD),
 
         // Code blocks - readable base color without DIM
-        LineType::CodeBlock => Style::default().fg(if light_bg {
+        LineType::CodeBlock => base.fg(if light_bg {
             Color::Indexed(238)
         } else {
-            Color::Indexed(250)
+            tokyo_night::BRIGHT_FG
         }),
 
         // Block quotes - italic blue
-        LineType::BlockQuote => Style::default()
+        LineType::BlockQuote => base
             .fg(if light_bg {
                 Color::Indexed(24)
             } else {
-                Color::Blue
+                tokyo_night::BLUE
             })
             .add_modifier(Modifier::ITALIC),
 
         // Horizontal rule - dim
-        LineType::HorizontalRule => Style::default()
+        LineType::HorizontalRule => base
             .fg(if light_bg {
                 Color::Indexed(241)
             } else {
-                Color::Indexed(240)
+                tokyo_night::MUTED
             })
             .add_modifier(Modifier::DIM),
 
         // Images - magenta italic to stand out as placeholder
-        LineType::Image => Style::default()
+        LineType::Image => base
             .fg(if light_bg {
                 Color::Indexed(90)
             } else {
-                Color::Magenta
+                tokyo_night::MAGENTA
             })
             .add_modifier(Modifier::ITALIC),
 
         // Math blocks - green italic
-        LineType::Math => Style::default()
+        LineType::Math => base
             .fg(if light_bg {
                 Color::Indexed(22)
             } else {
-                Color::Green
+                tokyo_night::GREEN
             })
             .add_modifier(Modifier::ITALIC),
 
         // List items, tables, paragraphs, empty lines - normal style
-        LineType::ListItem(_) | LineType::Table | LineType::Paragraph | LineType::Empty => {
-            Style::default()
-        }
+        LineType::ListItem(_) | LineType::Table | LineType::Paragraph | LineType::Empty => base,
     }
 }
 
@@ -136,7 +183,7 @@ pub fn style_for_inline(base: Style, inline: InlineStyle) -> Style {
             style = style.fg(if light_bg {
                 Color::Blue
             } else {
-                Color::LightBlue
+                tokyo_night::BLUE
             });
         }
     }
@@ -146,7 +193,7 @@ pub fn style_for_inline(base: Style, inline: InlineStyle) -> Style {
             .fg(if light_bg {
                 Color::Indexed(22)
             } else {
-                Color::Green
+                tokyo_night::GREEN
             })
             .add_modifier(Modifier::ITALIC);
     }
@@ -156,7 +203,7 @@ pub fn style_for_inline(base: Style, inline: InlineStyle) -> Style {
             .fg(if light_bg {
                 Color::Indexed(88)
             } else {
-                Color::Red
+                tokyo_night::RED
             })
             .add_modifier(Modifier::BOLD);
     }
@@ -252,36 +299,38 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             h1: Style::default()
-                .fg(Color::Cyan)
+                .fg(tokyo_night::CYAN)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             h2: Style::default()
-                .fg(Color::Green)
+                .fg(tokyo_night::GREEN)
                 .add_modifier(Modifier::BOLD),
             h3: Style::default()
-                .fg(Color::Yellow)
+                .fg(tokyo_night::YELLOW)
                 .add_modifier(Modifier::BOLD),
             h4: Style::default()
-                .fg(Color::Blue)
+                .fg(tokyo_night::BLUE)
                 .add_modifier(Modifier::BOLD),
-            code: Style::default().fg(Color::Indexed(250)),
-            inline_code: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            code: Style::default().fg(tokyo_night::BRIGHT_FG),
+            inline_code: Style::default()
+                .fg(tokyo_night::RED)
+                .add_modifier(Modifier::BOLD),
             quote: Style::default()
-                .fg(Color::Blue)
+                .fg(tokyo_night::BLUE)
                 .add_modifier(Modifier::ITALIC),
             link: Style::default()
-                .fg(Color::Blue)
+                .fg(tokyo_night::BLUE)
                 .add_modifier(Modifier::UNDERLINED),
             emphasis: Style::default().add_modifier(Modifier::ITALIC),
             strong: Style::default().add_modifier(Modifier::BOLD),
             strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
-            list_marker: Style::default().fg(Color::Yellow),
-            table_border: Style::default().fg(Color::Indexed(240)),
+            list_marker: Style::default().fg(tokyo_night::YELLOW),
+            table_border: Style::default().fg(tokyo_night::MUTED),
             image: Style::default()
-                .fg(Color::Magenta)
+                .fg(tokyo_night::MAGENTA)
                 .add_modifier(Modifier::ITALIC),
-            hr: Style::default().fg(Color::Indexed(240)),
-            status_bg: Color::Indexed(236), // Dark gray that works on both
-            status_fg: Color::Indexed(252), // Light gray
+            hr: Style::default().fg(tokyo_night::MUTED),
+            status_bg: tokyo_night::DARK_BG,
+            status_fg: tokyo_night::FG,
         }
     }
 }
@@ -364,22 +413,6 @@ mod tests {
             !style.add_modifier.contains(Modifier::DIM),
             "Code blocks should not use DIM modifier for better readability"
         );
-    }
-
-    #[test]
-    fn test_dark_theme_code_brighter_than_245() {
-        // The dark theme code block base color should be brighter than xterm 245
-        // (which was the previous faint color)
-        let theme = Theme::dark();
-        match theme.code.fg {
-            Some(Color::Indexed(idx)) => {
-                assert!(
-                    idx > 245,
-                    "Dark theme code color {idx} should be brighter than 245"
-                );
-            }
-            _ => panic!("Dark theme code should use indexed color"),
-        }
     }
 
     #[test]

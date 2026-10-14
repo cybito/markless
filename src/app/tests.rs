@@ -4045,10 +4045,10 @@ fn test_plain_click_does_not_copy_and_link_drag_does_not_open() {
 fn test_modified_click_copies_line_or_paragraph_and_overrides_links() {
     let doc = Document::parse_with_layout("[label](https://example.test)\nnext", 80).unwrap();
     for (modifiers, scope) in [
-        (KeyModifiers::SHIFT, super::CopyScope::Line),
+        (KeyModifiers::CONTROL, super::CopyScope::Line),
         (KeyModifiers::ALT, super::CopyScope::Paragraph),
         (
-            KeyModifiers::SHIFT | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
             super::CopyScope::Paragraph,
         ),
     ] {
@@ -4065,7 +4065,10 @@ fn test_modified_click_copies_line_or_paragraph_and_overrides_links() {
             Some(Message::StartCopySelection(0, scope))
         );
         let model = apply_mouse(model, down);
-        assert_eq!(model.selection_bytes(0), None);
+        assert_eq!(
+            model.selection_bytes(0),
+            Some(0..model.visible_line_text(0).len())
+        );
         let up = document_mouse(
             &model,
             MouseEventKind::Up(MouseButton::Left),
@@ -4140,7 +4143,7 @@ fn test_modified_click_drag_is_cancelled() {
         MouseEventKind::Down(MouseButton::Left),
         0,
         1,
-        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
     );
     let model = apply_mouse(model, down);
     let drag = document_mouse(
@@ -4148,7 +4151,7 @@ fn test_modified_click_drag_is_cancelled() {
         MouseEventKind::Drag(MouseButton::Left),
         0,
         3,
-        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
     );
     let model = apply_mouse(model, drag);
     assert_eq!(model.selection_bytes(0), None);
@@ -4157,7 +4160,7 @@ fn test_modified_click_drag_is_cancelled() {
         MouseEventKind::Up(MouseButton::Left),
         0,
         3,
-        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
     );
     let model = apply_mouse(model, up);
     assert!(model.selection.is_none());
@@ -4324,5 +4327,27 @@ fn test_hex_paragraph_copy_is_independent_of_viewport_cache() {
         let (text, count) = model.selected_text().unwrap();
         assert_eq!(count, 1000);
         assert_eq!(text, expected);
+    }
+}
+
+#[test]
+fn test_modified_click_previews_line_and_paragraph_before_release() {
+    for (scope, expected_lines) in [
+        (super::CopyScope::Line, vec![1]),
+        (super::CopyScope::Paragraph, vec![0, 1]),
+    ] {
+        let model = selection_model("first\nsecond\n\nthird");
+        let model = update(model, Message::StartCopySelection(1, scope));
+        for line in 0..4 {
+            assert_eq!(
+                model.selection_bytes(line),
+                expected_lines
+                    .contains(&line)
+                    .then(|| 0..model.visible_line_text(line).len()),
+                "{scope:?}, line {line}"
+            );
+        }
+        let model = update(model, Message::CancelCopySelection);
+        assert!((0..4).all(|line| model.selection_bytes(line).is_none()));
     }
 }

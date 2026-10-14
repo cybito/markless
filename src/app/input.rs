@@ -113,7 +113,7 @@ impl App {
                     if mouse.modifiers.contains(KeyModifiers::ALT) {
                         return Some(Message::StartCopySelection(line, CopyScope::Paragraph));
                     }
-                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                         return Some(Message::StartCopySelection(line, CopyScope::Line));
                     }
                     return Some(Message::StartTextSelection(text_position(line)));

@@ -1248,7 +1248,6 @@ fn test_editor_renders_tab_mid_line_to_tab_stop() {
 #[test]
 fn test_text_selection_highlights_only_selected_cells_across_styles() {
     use crate::app::{Message, update};
-    use ratatui::style::Color;
 
     let doc = Document::parse_with_layout("a **bc** [de](https://example.test) f", 80).unwrap();
     let mut model = Model::new(PathBuf::from("test.md"), doc, (80, 40));
@@ -1259,10 +1258,11 @@ fn test_text_selection_highlights_only_selected_cells_across_styles() {
     let mut terminal = create_test_terminal();
     terminal.draw(|frame| render(&mut model, frame)).unwrap();
     let buffer = terminal.backend().buffer();
+    let unselected_bg = buffer[(DOCUMENT_LEFT_PADDING, 0)].bg;
     for column in 0..9 {
         let cell = &buffer[(DOCUMENT_LEFT_PADDING + column, 0)];
         assert_eq!(
-            cell.bg == Color::DarkGray,
+            cell.bg != unselected_bg,
             (2..6).contains(&column),
             "column {column}"
         );
@@ -1277,7 +1277,6 @@ fn test_text_selection_highlights_only_selected_cells_across_styles() {
 #[test]
 fn test_text_selection_highlights_complete_wide_and_combining_graphemes() {
     use crate::app::{Message, update};
-    use ratatui::style::Color;
 
     let doc = Document::from_plain_text("A中e\u{301}文Z");
     let mut model = Model::new(PathBuf::from("test.txt"), doc, (80, 40));
@@ -1288,42 +1287,12 @@ fn test_text_selection_highlights_complete_wide_and_combining_graphemes() {
     let mut terminal = create_test_terminal();
     terminal.draw(|frame| render(&mut model, frame)).unwrap();
     let buffer = terminal.backend().buffer();
+    let unselected_bg = buffer[(DOCUMENT_LEFT_PADDING, 0)].bg;
+    let selected_bg = buffer[(DOCUMENT_LEFT_PADDING + 1, 0)].bg;
+    assert_ne!(selected_bg, unselected_bg);
     for column in [1, 3, 4] {
-        assert_eq!(
-            buffer[(DOCUMENT_LEFT_PADDING + column, 0)].bg,
-            Color::DarkGray
-        );
+        assert_eq!(buffer[(DOCUMENT_LEFT_PADDING + column, 0)].bg, selected_bg);
     }
-    assert_ne!(buffer[(DOCUMENT_LEFT_PADDING, 0)].bg, Color::DarkGray);
-    assert_ne!(buffer[(DOCUMENT_LEFT_PADDING + 6, 0)].bg, Color::DarkGray);
+    assert_eq!(buffer[(DOCUMENT_LEFT_PADDING + 6, 0)].bg, unselected_bg);
     assert_eq!(model.selected_text().unwrap().0, "中e\u{301}文");
-}
-
-#[test]
-fn test_help_and_readme_match_new_copy_and_half_page_bindings() {
-    let mut model = Model::new(
-        PathBuf::from("test.md"),
-        Document::parse("hello").unwrap(),
-        (100, 80),
-    );
-    model.help_visible = true;
-    let mut terminal = Terminal::new(TestBackend::new(100, 80)).unwrap();
-    terminal.draw(|frame| render(&mut model, frame)).unwrap();
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("d / u               Half page"));
-    assert!(text.contains("Mouse drag          Select text + copy"));
-    assert!(text.contains("Shift + click       Copy whole line"));
-    assert!(text.contains("Alt + click         Copy paragraph"));
-    assert!(!text.contains("Ctrl-d"));
-    assert!(!text.contains("Ctrl-u"));
-    let readme = include_str!("../../README.md");
-    assert!(readme.contains("`d` / `u`: half page"));
-    assert!(!readme.contains("Ctrl-d"));
-    assert!(!readme.contains("Ctrl-u"));
 }

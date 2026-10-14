@@ -997,20 +997,21 @@ impl Model {
 
     /// Text as rendered, including inline labels and code frame decoration.
     pub fn visible_line_text(&self, line: usize) -> String {
-        let mut text = if let Some(line) = self.document.line_at(line) {
-            line.spans().map_or_else(
-                || line.content().to_string(),
-                |spans| {
-                    spans
-                        .iter()
-                        .map(crate::document::InlineSpan::text)
-                        .collect::<String>()
-                },
-            )
-        } else {
+        let mut text = self.document.line_at(line).map_or_else(
             // Uncached hex rows still contain text and are not paragraph breaks.
-            self.document.hex_line_content(line).unwrap_or_default()
-        };
+            || self.document.hex_line_content(line).unwrap_or_default(),
+            |line| {
+                line.spans().map_or_else(
+                    || line.content().to_string(),
+                    |spans| {
+                        spans
+                            .iter()
+                            .map(crate::document::InlineSpan::text)
+                            .collect::<String>()
+                    },
+                )
+            },
+        );
         text.truncate(column_boundary(&text, self.max_doc_width() as usize).0);
         text
     }
@@ -1018,9 +1019,19 @@ impl Model {
     /// Byte range in rendered text, shared by copying and selection highlighting.
     pub fn selection_bytes(&self, line: usize) -> Option<std::ops::Range<usize>> {
         let selection = self.selection?;
-        if matches!(selection.mode, SelectionMode::Click(_))
-            || !self.selection_range()?.contains(&line)
-        {
+        if let SelectionMode::Click(scope) = selection.mode {
+            if selection.state != SelectionState::Pending {
+                return None;
+            }
+            let range = match scope {
+                super::CopyScope::Line => selection.anchor..=selection.anchor,
+                super::CopyScope::Paragraph => self.paragraph_range(selection.anchor)?,
+            };
+            return range
+                .contains(&line)
+                .then(|| 0..self.visible_line_text(line).len());
+        }
+        if !self.selection_range()?.contains(&line) {
             return None;
         }
         let text = self.visible_line_text(line);

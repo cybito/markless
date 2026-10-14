@@ -69,7 +69,7 @@ When given a directory, markless opens in browse mode: the sidebar shows the fil
 - `--image-mode <kitty|sixel|iterm2|halfblock>`  Force a specific image rendering protocol
 - `--force-half-cell`  Force half-cell image rendering (shortcut for `--image-mode halfblock`)
 - `--wrap-width <COLS>`  Maximum content width for word-wrapping
-- `--theme <auto|light|dark>`  Force highlight theme background (`auto` queries the terminal via OSC 11)
+- `--theme <auto|light|dark>`  选择浅色或 Omarchy Tokyo Night 深色配色（`auto` 通过 OSC 11 查询终端背景色）
 - `--no-inline-math`  Render inline math as images instead of Unicode text
 - `--inline-math`  Re-enable inline Unicode math (overrides saved `--no-inline-math`)
 - `--perf`  Enable startup performance logging
@@ -82,6 +82,14 @@ When given a directory, markless opens in browse mode: the sidebar shows the fil
 Config files:
 - Global (macOS): `~/Library/Application Support/markless/config`
 - Local override: `.marklessrc` in the current directory
+
+### Tokyo Night 配色
+
+深色模式的 Markdown、界面和代码高亮使用 [Omarchy Tokyo Night 官方色板](https://github.com/basecamp/omarchy/blob/master/themes/tokyo-night/colors.toml)，背景为 `#1a1b26`，正文为 `#a9b1d6`。显式指定的文档内联颜色保留；浅色模式保持原有配色。图片、Mermaid 图和公式图片不重新着色。
+
+```sh
+cargo run --release -- --theme dark README.md
+```
 
 ## Key Bindings
 
@@ -132,8 +140,8 @@ Mouse
 - Click links or images: open
 - Hover link/image: show URL
 - Click + drag: select text and copy on release
-- Shift + click: copy the entire displayed line
-- Alt + click: copy the paragraph between displayed blank lines
+- Ctrl + click：按下显示整行选区，释放时复制并隐藏
+- Alt + click：按下显示整段选区（显示空行之间），释放时复制并隐藏；拖动取消复制
 
 文本选区按终端显示的 grapheme 边界复制；十六进制段落复制包含尚未缓存的行，不受滚动位置影响。
 

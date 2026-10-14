@@ -4,6 +4,8 @@ use ratatui_image::{CropOptions, Resize, StatefulImage};
 
 use crate::app::Model;
 
+use super::style::{themed_color, tokyo_night};
+
 /// Compute the horizontal offset for centering an image within the effective
 /// content width. When `wrap_width` is set and smaller than `doc_area_width`,
 /// the image is centered within the wrap width instead of the full area.
@@ -97,7 +99,7 @@ pub fn render_images(model: &mut Model, frame: &mut Frame, doc_area: Rect) {
         if matches!(protocol.protocol_type(), StatefulProtocolType::ITerm2(_)) {
             if image_scroll_settling {
                 // iTerm2/Warp can flicker when re-embedding inline images during rapid scroll.
-                // Draw a cheap gray placeholder while scrolling; restore image on settle.
+                // Draw a cheap muted placeholder while scrolling; restore image on settle.
                 let frame_buf = frame.buffer_mut();
                 for row in 0..visible_rows {
                     let dst_row = dst_y + row;
@@ -108,8 +110,8 @@ pub fn render_images(model: &mut Model, frame: &mut Frame, doc_area: Rect) {
                         let dst_cell = &mut frame_buf[(doc_area.x + x_offset + col, dst_row)];
                         dst_cell
                             .set_symbol(" ")
-                            .set_bg(Color::DarkGray)
-                            .set_fg(Color::DarkGray)
+                            .set_bg(themed_color(Color::DarkGray, tokyo_night::MUTED))
+                            .set_fg(themed_color(Color::DarkGray, tokyo_night::MUTED))
                             .set_skip(false);
                     }
                 }

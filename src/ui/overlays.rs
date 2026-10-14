@@ -3,6 +3,17 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 use crate::app::Model;
 
+use super::style::{themed_color, themed_style, tokyo_night};
+
+fn popup_style() -> Style {
+    themed_style(
+        Style::default().bg(Color::Black).fg(Color::White),
+        Style::default()
+            .bg(tokyo_night::LIGHTER_BG)
+            .fg(tokyo_night::FG),
+    )
+}
+
 pub fn link_picker_rect(area: Rect, items_len: usize) -> Rect {
     let popup_width = area.width.saturating_sub(16).max(44);
     // Link picker has at most a handful of items
@@ -38,7 +49,7 @@ pub fn render_link_picker_overlay(model: &Model, frame: &mut Frame, area: Rect) 
             Span::styled(
                 number,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(themed_color(Color::Yellow, tokyo_night::YELLOW))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -49,7 +60,10 @@ pub fn render_link_picker_overlay(model: &Model, frame: &mut Frame, area: Rect) 
         lines.push(Line::from(vec![
             Span::raw(left_margin),
             Span::raw("   "),
-            Span::styled(link.url.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                link.url.clone(),
+                Style::default().fg(themed_color(Color::Cyan, tokyo_night::CYAN)),
+            ),
         ]));
     }
     lines.push(Line::raw(" "));
@@ -57,7 +71,7 @@ pub fn render_link_picker_overlay(model: &Model, frame: &mut Frame, area: Rect) 
         Span::raw("   "),
         Span::styled(
             "1-9 open · any key or click outside cancels",
-            Style::default().fg(Color::Indexed(245)),
+            Style::default().fg(themed_color(Color::Indexed(245), tokyo_night::DARK_FG)),
         ),
     ]));
 
@@ -65,9 +79,12 @@ pub fn render_link_picker_overlay(model: &Model, frame: &mut Frame, area: Rect) 
         .title("Open Link")
         .borders(Borders::ALL)
         .padding(Padding::uniform(1))
-        .style(Style::default().bg(Color::Black).fg(Color::White));
+        .style(popup_style());
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(
+        Paragraph::new(lines).style(popup_style()).block(block),
+        popup,
+    );
 }
 
 pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
@@ -85,9 +102,9 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
         .map_or_else(|| "<none>".to_string(), |p| p.display().to_string());
 
     let section_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(themed_color(Color::Yellow, tokyo_night::YELLOW))
         .add_modifier(Modifier::BOLD);
-    let dim_style = Style::default().fg(Color::Indexed(245));
+    let dim_style = Style::default().fg(themed_color(Color::Indexed(245), tokyo_night::DARK_FG));
 
     let mut all_lines: Vec<Line> = Vec::new();
 
@@ -144,9 +161,14 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     all_lines.push(Line::raw("  q / Ctrl-c / Ctrl-q Quit"));
     all_lines.push(Line::raw("  ? / F1              Toggle help"));
     all_lines.push(Line::raw("  Mouse drag          Select text + copy"));
-    all_lines.push(Line::raw("  Shift + click       Copy whole line"));
     all_lines.push(Line::raw(
-        "  Alt + click         Copy paragraph (between blank lines)",
+        "  Ctrl + click        Copy whole line on release",
+    ));
+    all_lines.push(Line::raw(
+        "  Alt + click         Copy paragraph on release (between blank lines)",
+    ));
+    all_lines.push(Line::raw(
+        "  Modified click      Hold to preview; drag cancels",
     ));
     all_lines.push(Line::raw(""));
 
@@ -159,7 +181,7 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
         .title("Help")
         .borders(Borders::ALL)
         .padding(Padding::uniform(1))
-        .style(Style::default().bg(Color::Black).fg(Color::White));
+        .style(popup_style());
 
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
@@ -182,12 +204,12 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     let visible: Vec<Line> = all_lines[scroll..end].to_vec();
 
     let content_area = Rect::new(inner.x, inner.y, inner.width, content_height_u16);
-    frame.render_widget(Paragraph::new(visible), content_area);
+    frame.render_widget(Paragraph::new(visible).style(popup_style()), content_area);
 
     // Footer hint
     let footer_area = Rect::new(inner.x, inner.y + content_height_u16, inner.width, 1);
     let footer = Line::styled("j/k scroll \u{2502} Esc closes", dim_style);
-    frame.render_widget(Paragraph::new(footer), footer_area);
+    frame.render_widget(Paragraph::new(footer).style(popup_style()), footer_area);
 }
 
 fn centered_popup_rect(width: u16, height: u16, area: Rect) -> Rect {

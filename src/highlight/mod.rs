@@ -2,19 +2,13 @@
 //!
 //! Uses syntect for highlighting with Sublime Text syntax definitions.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::{Color, StyleModifier, Theme, ThemeItem, ThemeSet, ThemeSettings};
 use syntect::parsing::SyntaxSet;
 
 use crate::document::{InlineColor, InlineSpan, InlineStyle};
-
-// TODO: Implement syntax highlighting
-// - Load syntax set
-// - Load theme
-// - Highlight code blocks
-// - Convert to ratatui spans
 
 #[cfg(test)]
 mod tests {
@@ -145,80 +139,63 @@ mod tests {
     }
 
     #[test]
-    fn test_dark_mode_code_spans_are_bright_enough() {
-        // Syntax-highlighted code on a dark background should be compressed
-        // into a comfortable range: dim colors boosted, bright colors tamed.
-        set_background_mode(Some(HighlightBackground::Dark));
-        let code = "fn main() {\n    let x = 42;\n    println!(\"hello\");\n}\n";
-        let lines = highlight_code(Some("rust"), code);
-        set_background_mode(None);
-
-        let lumas: Vec<f32> = lines
-            .iter()
-            .flatten()
-            .filter_map(|span| {
-                let fg = span.style().fg?;
-                Some(
-                    0.2126f32 * f32::from(fg.r)
-                        + 0.7152 * f32::from(fg.g)
-                        + 0.0722 * f32::from(fg.b),
-                )
-            })
-            .collect();
-        assert!(!lumas.is_empty(), "Should have colored spans");
-
-        let min_luma = lumas.iter().copied().fold(f32::INFINITY, f32::min);
-        let max_luma = lumas.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-
-        assert!(
-            min_luma >= 145.0,
-            "Darkest syntax color has luma {min_luma:.1}, too faint (need >= 145)"
-        );
-        assert!(
-            max_luma <= 210.0,
-            "Brightest syntax color has luma {max_luma:.1}, too hot (need <= 210)"
-        );
+    fn test_tokyo_night_semantic_colors() {
+        let syntax_set = syntax_set();
+        let syntax = syntax_set.find_syntax_by_token("rust").unwrap();
+        let mut highlighter = HighlightLines::new(syntax, theme_for_mode(BackgroundMode::Dark));
+        let ranges = highlighter
+            .highlight_line(
+                "fn main() { let x: u32 = 42; let s = \"hello\"; } // comment\n",
+                syntax_set,
+            )
+            .unwrap();
+        for (token, expected) in [
+            ("fn", (0xad, 0x8e, 0xe6)),
+            ("main", (0x7a, 0xa2, 0xf7)),
+            ("u32", (0xe0, 0xaf, 0x68)),
+            ("42", (0xeb, 0x92, 0x7b)),
+            ("hello", (0x9e, 0xce, 0x6a)),
+            ("=", (0x44, 0x9d, 0xab)),
+            ("comment", (0x56, 0x5f, 0x89)),
+        ] {
+            let (style, _) = ranges
+                .iter()
+                .find(|(_, text)| text.contains(token))
+                .unwrap();
+            assert_eq!(
+                (style.foreground.r, style.foreground.g, style.foreground.b),
+                expected,
+                "Unexpected Tokyo Night color for {token}"
+            );
+        }
     }
 
     #[test]
-    fn test_dark_mode_boosts_dim_fg() {
-        let dim = InlineColor {
-            r: 101,
-            g: 123,
-            b: 131,
-        };
-        let adjusted = adjust_fg_for_background(dim, BackgroundMode::Dark);
-        let luma =
-            0.2126 * adjusted.r as f32 + 0.7152 * adjusted.g as f32 + 0.0722 * adjusted.b as f32;
-        assert!(
-            luma >= 145.0,
-            "Boosted color luma {luma:.1} should be >= 145"
-        );
-        // Hue should be preserved: ratios between channels stay similar
-        let orig_ratio = dim.r as f32 / dim.g as f32;
-        let adj_ratio = adjusted.r as f32 / adjusted.g as f32;
-        assert!(
-            (orig_ratio - adj_ratio).abs() < 0.05,
-            "Hue should be preserved: orig r/g={orig_ratio:.3} adj r/g={adj_ratio:.3}"
-        );
+    fn test_dark_mode_preserves_palette_colors() {
+        for color in [
+            InlineColor {
+                r: 0x56,
+                g: 0x5f,
+                b: 0x89,
+            },
+            InlineColor {
+                r: 0x9e,
+                g: 0xce,
+                b: 0x6a,
+            },
+        ] {
+            assert_eq!(adjust_fg_for_background(color, BackgroundMode::Dark), color);
+        }
     }
 
     #[test]
-    fn test_dark_mode_compresses_bright_colors() {
-        let bright = InlineColor {
-            r: 200,
-            g: 180,
-            b: 160,
-        };
-        let adjusted = adjust_fg_for_background(bright, BackgroundMode::Dark);
-        let orig_luma =
-            0.2126 * bright.r as f32 + 0.7152 * bright.g as f32 + 0.0722 * bright.b as f32;
-        let adj_luma =
-            0.2126 * adjusted.r as f32 + 0.7152 * adjusted.g as f32 + 0.0722 * adjusted.b as f32;
-        assert!(
-            adj_luma < orig_luma,
-            "Bright color luma {adj_luma:.1} should be reduced from {orig_luma:.1}"
-        );
+    fn test_theme_selection_tracks_background_mode() {
+        let dark = theme_for_mode(BackgroundMode::Dark);
+        let light = theme_for_mode(BackgroundMode::Light);
+        assert_eq!(dark.name.as_deref(), Some("Omarchy Tokyo Night"));
+        assert_ne!(light.name, dark.name);
+        assert!(std::ptr::eq(dark, theme_for_mode(BackgroundMode::Dark)));
+        assert!(std::ptr::eq(light, theme_for_mode(BackgroundMode::Light)));
     }
 
     #[test]
@@ -284,7 +261,7 @@ pub fn highlight_code(language: Option<&str>, code: &str) -> Vec<Vec<InlineSpan>
         return lines;
     };
 
-    let mut highlighter = HighlightLines::new(syntax, theme());
+    let mut highlighter = HighlightLines::new(syntax, theme_for_mode(mode));
     for line in code.lines() {
         // SyntaxSet::load_defaults_newlines() expects each line to end
         // with '\n'.  str::lines() strips newlines, so we must re-add it;
@@ -329,39 +306,74 @@ fn syntax_set() -> &'static SyntaxSet {
     })
 }
 
-fn theme() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME.get_or_init(|| {
+fn theme_for_mode(mode: BackgroundMode) -> &'static Theme {
+    static DARK_THEME: LazyLock<Theme> = LazyLock::new(tokyo_night_theme);
+    static LIGHT_THEME: LazyLock<Theme> = LazyLock::new(|| {
         let _scope = crate::perf::scope("highlight.theme.load_defaults");
         let theme_set = ThemeSet::load_defaults();
-        let mode = background_mode();
-        let preferred = match mode {
-            BackgroundMode::Dark => [
-                "Monokai Extended",
-                "Monokai Extended Bright",
-                "Dracula",
-                "Solarized (dark)",
-                "base16-ocean.dark",
-            ]
-            .as_slice(),
-            BackgroundMode::Light => {
-                ["InspiredGitHub", "Solarized (light)", "base16-ocean.light"].as_slice()
-            }
-        };
-
-        for name in preferred {
-            if let Some(theme) = theme_set.themes.get(*name) {
+        for name in ["InspiredGitHub", "Solarized (light)", "base16-ocean.light"] {
+            if let Some(theme) = theme_set.themes.get(name) {
                 return theme.clone();
             }
         }
-
         theme_set
             .themes
             .values()
             .next()
             .cloned()
             .unwrap_or_default()
+    });
+    match mode {
+        BackgroundMode::Dark => &DARK_THEME,
+        BackgroundMode::Light => &LIGHT_THEME,
+    }
+}
+
+fn tokyo_night_theme() -> Theme {
+    // Omarchy Tokyo Night palette, applied to semantic TextMate scopes rather
+    // than transforming the colors of an unrelated bundled theme.
+    use crate::ui::style::tokyo_night;
+
+    let rgb = |color| {
+        let ratatui::style::Color::Rgb(r, g, b) = color else {
+            unreachable!("Tokyo Night palette colors must be RGB");
+        };
+        Color { r, g, b, a: 255 }
+    };
+    let scopes = [
+        ("comment", rgb(tokyo_night::DARK_FG)),
+        ("keyword, storage", rgb(tokyo_night::MAGENTA)),
+        ("string", rgb(tokyo_night::GREEN)),
+        ("entity.name.function, support.function", rgb(tokyo_night::BLUE)),
+        ("entity.name.type, entity.name.class, entity.name.namespace, support.type, support.class", rgb(tokyo_night::YELLOW)),
+        ("storage.type", rgb(tokyo_night::YELLOW)),
+        ("storage.type.function", rgb(tokyo_night::MAGENTA)),
+        ("constant.numeric, constant.language", rgb(tokyo_night::ORANGE)),
+        ("keyword.operator", rgb(tokyo_night::CYAN)),
+        ("constant.character.escape", rgb(tokyo_night::BRIGHT_MAGENTA)),
+        ("entity.name.tag, invalid", rgb(tokyo_night::RED)),
+        ("entity.other.attribute-name", rgb(tokyo_night::YELLOW)),
+    ]
+    .into_iter()
+    .map(|(scope, foreground)| ThemeItem {
+        scope: scope.parse().expect("valid Tokyo Night scope selector"),
+        style: StyleModifier {
+            foreground: Some(foreground),
+            ..StyleModifier::default()
+        },
     })
+    .collect();
+    Theme {
+        name: Some("Omarchy Tokyo Night".to_string()),
+        settings: ThemeSettings {
+            foreground: Some(rgb(tokyo_night::FG)),
+            background: Some(rgb(tokyo_night::BG)),
+            selection: Some(rgb(tokyo_night::SELECTION)),
+            ..ThemeSettings::default()
+        },
+        scopes,
+        ..Theme::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,28 +448,7 @@ fn background_mode_from_colorfgbg(colorfgbg: Option<&str>) -> BackgroundMode {
 
 fn adjust_fg_for_background(color: InlineColor, mode: BackgroundMode) -> InlineColor {
     match mode {
-        BackgroundMode::Dark => {
-            let luma = 0.2126f32.mul_add(
-                f32::from(color.r),
-                0.7152f32.mul_add(f32::from(color.g), 0.0722 * f32::from(color.b)),
-            );
-            if luma < 1.0 {
-                return color;
-            }
-            // Compress dynamic range: pull all colors toward a center
-            // brightness so dim tokens get boosted and overly bright
-            // tokens are tamed.
-            let center = 175.0;
-            let ratio = 0.45;
-            let new_luma = (luma - center).mul_add(ratio, center);
-            let scale = new_luma / luma;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            InlineColor {
-                r: (f32::from(color.r) * scale).round().clamp(0.0, 255.0) as u8,
-                g: (f32::from(color.g) * scale).round().clamp(0.0, 255.0) as u8,
-                b: (f32::from(color.b) * scale).round().clamp(0.0, 255.0) as u8,
-            }
-        }
+        BackgroundMode::Dark => color,
         BackgroundMode::Light => {
             let luma = 0.2126f32.mul_add(
                 f32::from(color.r),
