@@ -19,6 +19,9 @@ impl App {
         resize_debouncer: &mut ResizeDebouncer,
     ) -> Option<Message> {
         match event {
+            Event::Paste(text) if model.editor_mode && !model.help_visible => {
+                Some(Message::EditorPaste(text.clone()))
+            }
             Event::Key(key) if key.kind == KeyEventKind::Press => Self::handle_key(*key, model),
             Event::Mouse(mouse) => Self::handle_mouse(*mouse, model),
             Event::Resize(w, h) => {
@@ -454,6 +457,7 @@ impl App {
             KeyCode::PageDown => Some(Message::EditorScrollDown(20)),
 
             // Editing
+            KeyCode::Char('j') if ctrl => Some(Message::EditorSplitLine),
             KeyCode::Enter => Some(Message::EditorSplitLine),
             KeyCode::Backspace => Some(Message::EditorDeleteBack),
             KeyCode::Delete => Some(Message::EditorDeleteForward),

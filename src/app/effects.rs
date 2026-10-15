@@ -474,7 +474,11 @@ impl App {
         if let Some(reporter) = ime.as_deref_mut() {
             reporter.stop();
         }
-        let _ = execute!(stdout(), crossterm::event::DisableFocusChange);
+        let _ = execute!(
+            stdout(),
+            crossterm::event::DisableFocusChange,
+            crossterm::event::DisableBracketedPaste
+        );
 
         // Suspend TUI: disable mouse, leave alternate screen, disable raw mode
         let _ = set_mouse_motion_tracking(false);
@@ -495,7 +499,11 @@ impl App {
             let _ = execute!(stdout(), EnableMouseCapture);
             let _ = set_mouse_motion_tracking(true);
         }
-        let _ = execute!(stdout(), crossterm::event::EnableFocusChange);
+        let _ = execute!(
+            stdout(),
+            crossterm::event::EnableFocusChange,
+            crossterm::event::EnableBracketedPaste
+        );
         if let Some(reporter) = ime {
             reporter.resume();
         }

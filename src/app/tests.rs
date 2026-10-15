@@ -2612,6 +2612,65 @@ fn test_enter_edit_mode_is_idempotent() {
 // --- Editor input mapping tests ---
 
 #[test]
+fn test_editor_paste_preserves_markdown_newlines() {
+    for text in [
+        "# 标题\n\n- one\n\t- two\n",
+        "# 标题\r\n\r\n- one\r\t- two\r",
+    ] {
+        let mut model = enter_edit_mode(create_test_model());
+        let original = model.editor_buffer.as_ref().unwrap().text();
+        let mut debouncer = ResizeDebouncer::new(100);
+        let msg = App::handle_event(
+            &event::Event::Paste(text.to_owned()),
+            &model,
+            0,
+            &mut debouncer,
+        )
+        .expect("editor must accept pasted text");
+        model = update(model, msg);
+        let buf = model.editor_buffer.as_ref().unwrap();
+        assert_eq!(buf.text(), format!("# 标题\n\n- one\n\t- two\n{original}"));
+        assert_eq!(buf.cursor().line, 4);
+        assert_eq!(buf.cursor().col, 0);
+        assert!(buf.is_dirty());
+    }
+}
+
+#[test]
+fn test_editor_unbracketed_paste_preserves_lf() {
+    let mut model = enter_edit_mode(create_test_model());
+    let original = model.editor_buffer.as_ref().unwrap().text();
+    // In raw mode crossterm reports an unbracketed LF as Ctrl-J.
+    for key in [
+        event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        event::KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        event::KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    ] {
+        if let Some(msg) = App::handle_key(key, &model) {
+            model = update(model, msg);
+        }
+    }
+    assert_eq!(
+        model.editor_buffer.as_ref().unwrap().text(),
+        format!("a\nb{original}")
+    );
+}
+
+#[test]
+fn test_paste_outside_editor_is_ignored() {
+    let mut debouncer = ResizeDebouncer::new(100);
+    assert_eq!(
+        App::handle_event(
+            &event::Event::Paste("e\nq".to_owned()),
+            &create_test_model(),
+            0,
+            &mut debouncer,
+        ),
+        None
+    );
+}
+
+#[test]
 fn test_e_key_enters_edit_mode() {
     let model = create_test_model();
     let msg = App::handle_key(

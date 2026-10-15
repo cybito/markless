@@ -230,6 +230,7 @@ fn main() -> Result<()> {
         let _ = crossterm::execute!(
             std::io::stderr(),
             crossterm::event::DisableFocusChange,
+            crossterm::event::DisableBracketedPaste,
             crossterm::terminal::LeaveAlternateScreen,
         );
         default_hook(info);

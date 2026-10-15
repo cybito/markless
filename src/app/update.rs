@@ -126,6 +126,8 @@ pub enum Message {
     ExitEditMode,
     /// Insert a character at the cursor
     EditorInsertChar(char),
+    /// Insert pasted text, preserving line breaks and tabs.
+    EditorPaste(String),
     /// Insert spaces to advance to the next tab stop (Tab key, smart-tab behavior)
     EditorInsertTab,
     /// Delete character before cursor (Backspace)
@@ -566,6 +568,15 @@ pub fn update(mut model: Model, msg: Message) -> Model {
         Message::EditorInsertChar(ch) => {
             if let Some(buf) = &mut model.editor_buffer {
                 buf.insert_char(ch);
+                editor_ensure_cursor_visible(&mut model);
+            }
+        }
+        Message::EditorPaste(text) => {
+            if model.editor_mode
+                && let Some(buf) = &mut model.editor_buffer
+            {
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                buf.insert_str(&text);
                 editor_ensure_cursor_visible(&mut model);
             }
         }

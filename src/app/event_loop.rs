@@ -280,7 +280,11 @@ impl App {
         let mut ime = super::ime::Ime::new();
         let result = Self::event_loop_with_ime(terminal, model, &mut ime);
         ime.quit();
-        let _ = execute!(stdout(), crossterm::event::DisableFocusChange);
+        let _ = execute!(
+            stdout(),
+            crossterm::event::DisableFocusChange,
+            crossterm::event::DisableBracketedPaste
+        );
         result
     }
 
@@ -299,7 +303,11 @@ impl App {
             crate::perf::log_event("event.drain.startup", format!("drained={drained_startup}"));
         }
 
-        execute!(stdout(), crossterm::event::EnableFocusChange)?;
+        execute!(
+            stdout(),
+            crossterm::event::EnableFocusChange,
+            crossterm::event::EnableBracketedPaste
+        )?;
         ime.focus_in(super::ime::text_mode(model));
 
         let start = Instant::now();
