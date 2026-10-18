@@ -504,9 +504,6 @@ impl App {
             crossterm::event::EnableFocusChange,
             crossterm::event::EnableBracketedPaste
         );
-        if let Some(reporter) = ime {
-            reporter.resume();
-        }
         model.needs_full_redraw = true;
 
         match result {
@@ -536,6 +533,9 @@ impl App {
         }
 
         model.editor_disk_hash = None;
+        if let Some(reporter) = ime {
+            reporter.resume(super::ime::text_mode(model));
+        }
     }
 
     fn save_editor_buffer(model: &mut Model) {

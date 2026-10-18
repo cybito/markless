@@ -222,9 +222,16 @@ impl Ime {
         self.suspended = true;
     }
 
-    /// Terminal/UI return is not evidence of foreground input or focus.
-    pub const fn resume(&mut self) {
+    /// The caller has restored its terminal; report its current mode before input resumes.
+    /// This is a fresh claim, subject to the transport's foreground arbitration.
+    pub fn resume(&mut self, editing: bool) {
         self.running = true;
+        if !self.enabled || !self.suspended {
+            return;
+        }
+        self.suspended = false;
+        self.focused = true;
+        self.activate(editing);
     }
 
     fn resume_intent(&mut self, editing: bool) {
@@ -293,7 +300,7 @@ pub(super) const fn text_mode(model: &super::Model) -> bool {
         && (model.editor_mode || model.search_query.is_some())
 }
 
-/// Focus and real keys alone can establish a foreground episode.
+/// Input/focus events sample the current classifier; terminal return uses `resume`.
 pub(super) fn prepare_event(
     ime: &mut Ime,
     event: &crossterm::event::Event,
