@@ -28,6 +28,7 @@ fn reporter(client: UnixStream) -> Ime {
         enabled: true,
         running: true,
         focused: false,
+        focus_lost: false,
         suspended: false,
         state: None,
         transport: None,
@@ -74,6 +75,7 @@ fn missing_service_disables_reporter_without_blocking_input_or_lifecycle() -> Re
         enabled: true,
         running: true,
         focused: false,
+        focus_lost: false,
         suspended: false,
         state: None,
         transport: Some(Transport::Direct(fixture.root.join("missing"))),
@@ -350,6 +352,7 @@ impl Fixture {
             enabled: true,
             running: true,
             focused: false,
+            focus_lost: false,
             suspended: false,
             state: None,
             transport: Some(self.select(identity)?),
@@ -425,6 +428,8 @@ fn herdr_pane_and_popup_streams_use_recorded_only_and_preserve_parent_handoff() 
         ime.sync(false);
         assert!(!ime.command_ready());
         ime.input(true);
+        assert!(!ime.focused, "input must not override explicit focus loss");
+        ime.focus_in(true);
         ime.quit();
         service.join().unwrap();
     }
@@ -825,5 +830,51 @@ fn dropping_reporter_releases_lease_by_eof() -> Result<()> {
     ime.focus_in(false);
     drop(ime);
     service.join().unwrap();
+    Ok(())
+}
+
+#[test]
+fn explicit_blur_blocks_input_and_child_return_until_focus_in() -> Result<()> {
+    for blur_first in [true, false] {
+        let (client, server) = UnixStream::pair()?;
+        let mut ime = reporter(client);
+        let service = thread::spawn(move || {
+            let mut peer = BufReader::new(server);
+            let lifecycle = if blur_first {
+                ["blur", "suspend"]
+            } else {
+                ["suspend", "blur"]
+            };
+            receive(&mut peer, "activate", Some("command"));
+            acknowledge(&mut peer, 1, "applied");
+            for op in lifecycle {
+                receive(&mut peer, op, None);
+                acknowledge(&mut peer, 2, "applied");
+            }
+            receive(&mut peer, "activate", Some("command"));
+            acknowledge(&mut peer, 3, "applied");
+            receive(&mut peer, "close", None);
+            acknowledge(&mut peer, 4, "applied");
+        });
+        ime.focus_in(false);
+        if blur_first {
+            ime.focus_out();
+            ime.input(false);
+            ime.input(true);
+            ime.stop();
+        } else {
+            ime.stop();
+            ime.focus_out();
+        }
+        ime.resume(false);
+        ime.input(false);
+        ime.sync(true);
+        assert!(!ime.focused);
+        assert!(!ime.command_ready());
+        ime.focus_in(false);
+        assert!(ime.command_ready());
+        ime.quit();
+        service.join().unwrap();
+    }
     Ok(())
 }

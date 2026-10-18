@@ -15,6 +15,8 @@ pub struct Ime {
     enabled: bool,
     running: bool,
     focused: bool,
+    // Explicit terminal focus loss cannot be overridden by input or child return.
+    focus_lost: bool,
     suspended: bool,
     state: Option<bool>,
     #[cfg(unix)]
@@ -48,6 +50,7 @@ impl Ime {
             enabled,
             running: true,
             focused: false,
+            focus_lost: false,
             suspended: false,
             state: None,
             #[cfg(unix)]
@@ -161,7 +164,7 @@ impl Ime {
 
     /// Genuine terminal input samples the current editing classifier, not a cached mode.
     pub fn input(&mut self, editing: bool) {
-        if !self.enabled || !self.running {
+        if !self.enabled || !self.running || self.focus_lost {
             return;
         }
         if !self.focused || self.state.is_none() {
@@ -189,6 +192,7 @@ impl Ime {
     }
 
     pub fn focus_out(&mut self) {
+        self.focus_lost = true;
         self.focused = false;
         self.state = None;
         #[cfg(unix)]
@@ -198,6 +202,7 @@ impl Ime {
     }
 
     pub fn focus_in(&mut self, editing: bool) {
+        self.focus_lost = false;
         if !self.enabled || !self.running {
             return;
         }
@@ -230,6 +235,9 @@ impl Ime {
             return;
         }
         self.suspended = false;
+        if self.focus_lost {
+            return;
+        }
         self.focused = true;
         self.activate(editing);
     }
