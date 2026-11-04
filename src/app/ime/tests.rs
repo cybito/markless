@@ -32,7 +32,7 @@ fn reporter(client: UnixStream) -> Ime {
         suspended: false,
         state: None,
         transport: None,
-        connection: Some(Connection::from_stream(client, false)),
+        connection: Some(Connection::from_stream(client)),
     }
 }
 
@@ -309,6 +309,8 @@ struct Fixture {
     listener: UnixListener,
 }
 
+const TERMINAL: &str = "term-7";
+
 impl Fixture {
     fn new() -> Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -320,7 +322,8 @@ impl Fixture {
         fs::DirBuilder::new().mode(0o700).create(&root)?;
         let path = root.join("s");
         let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        // herdr-core leaves its socket 0755 inside the private directory.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
         Ok(Self {
             root,
             path,
@@ -328,26 +331,29 @@ impl Fixture {
         })
     }
 
-    fn select(&self, identity: (&str, &str)) -> Result<Transport> {
-        let values = [
-            ("HERDR_IME_INTENT", OsString::from("1")),
-            ("HERDR_ENV", OsString::from("1")),
-            ("HERDR_SOCKET_PATH", self.path.clone().into_os_string()),
-            (identity.0, OsString::from(identity.1)),
-        ];
-        Ok(Transport::select(
+    fn env(&self, socket: &std::path::Path) -> Vec<(&'static str, OsString)> {
+        vec![
+            ("HC_TERMINAL_ID", OsString::from(TERMINAL)),
+            ("HC_TERMINAL_SOCKET", socket.as_os_str().to_owned()),
+            // hc selection precedes and ignores SSH/GUI eligibility.
+            ("SSH_CONNECTION", OsString::from("1 2 3 4")),
+        ]
+    }
+
+    fn select_with(&self, socket: &std::path::Path) -> Result<Option<Transport>> {
+        let values = self.env(socket);
+        Transport::select(
             |key| {
                 values
                     .iter()
                     .find(|(name, _)| *name == key)
                     .map(|(_, value)| value.clone())
             },
-            || panic!("Herdr must be selected before ordinary SSH/GUI eligibility"),
-        )?
-        .unwrap())
+            || panic!("hc must be selected before ordinary SSH/GUI eligibility"),
+        )
     }
 
-    fn reporter(&self, identity: (&str, &str)) -> Result<Ime> {
+    fn reporter(&self) -> Result<Ime> {
         Ok(Ime {
             enabled: true,
             running: true,
@@ -355,7 +361,7 @@ impl Fixture {
             focus_lost: false,
             suspended: false,
             state: None,
-            transport: Some(self.select(identity)?),
+            transport: Some(self.select_with(&self.path)?.unwrap()),
             connection: None,
         })
     }
@@ -367,72 +373,118 @@ impl Drop for Fixture {
     }
 }
 
-fn open(peer: &mut BufReader<UnixStream>, params: &Value) {
+/// Reads one `terminal.label` write and returns its id.
+fn label_request(peer: &mut BufReader<UnixStream>, state: Option<&str>) -> Value {
     let mut frame = String::new();
-    peer.read_line(&mut frame).unwrap();
+    assert!(
+        peer.read_line(&mut frame).unwrap() > 0,
+        "expected a label write"
+    );
     let request: Value = serde_json::from_str(&frame).unwrap();
-    assert_eq!(request["id"], "ime:open");
-    assert_eq!(request["method"], "pane.input_intent.stream");
-    assert_eq!(&request["params"], params);
+    assert_eq!(request["jsonrpc"], "2.0");
+    assert_eq!(request["method"], "terminal.label");
+    assert_eq!(request["params"]["terminal"], TERMINAL);
+    let expected = state.map_or_else(String::new, |state| {
+        format!("1:{}:{state}", rustix::process::getpgrp().as_raw_nonzero())
+    });
+    assert_eq!(request["params"]["labels"]["imekit.intent"], expected);
+    assert_eq!(request["params"]["labels"].as_object().unwrap().len(), 1);
+    request
 }
 
-fn opened(peer: &mut BufReader<UnixStream>) {
-    writeln!(peer.get_mut(), "{}", json!({ "id": "ime:open", "result": { "type": "pane_input_intent_stream_opened", "session": "test-lease", "generation": 1 } })).unwrap();
+/// Accepts one label write as herdr-core would.
+fn label(peer: &mut BufReader<UnixStream>, state: Option<&str>) {
+    let request = label_request(peer, state);
+    let value = &request["params"]["labels"]["imekit.intent"];
+    let labels = if value == "" {
+        json!({ "other": "x" })
+    } else {
+        json!({ "imekit.intent": value, "other": "x" })
+    };
+    writeln!(
+        peer.get_mut(),
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": request["id"], "result": { "terminal": TERMINAL, "labels": labels } })
+    )
+    .unwrap();
+}
+
+fn assert_no_more_writes(mut peer: BufReader<UnixStream>) {
+    let mut unexpected = String::new();
+    assert_eq!(peer.read_line(&mut unexpected).unwrap(), 0);
 }
 
 #[test]
-fn herdr_pane_and_popup_streams_use_recorded_only_and_preserve_parent_handoff() -> Result<()> {
-    for (identity, params) in [
-        (("HERDR_PANE_ID", "pane-7"), json!({ "pane_id": "pane-7" })),
-        (
-            ("HERDR_IME_POPUP_TERMINAL_ID", "42"),
-            json!({ "popup_terminal_id": "42" }),
-        ),
+fn hc_labels_follow_lifecycle_and_preserve_parent_handoff() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut ime = fixture.reporter()?;
+    let listener = fixture.listener.try_clone()?;
+    let service = thread::spawn(move || {
+        let mut peer = BufReader::new(listener.accept().unwrap().0);
+        for state in [
+            Some("command"), // activate
+            Some("text"),    // state
+            Some("idle"),    // suspend
+            Some("text"),    // resume activate
+            Some("command"), // state
+            Some("idle"),    // blur
+            Some("text"),    // activate
+            None,            // close deletes
+        ] {
+            label(&mut peer, state);
+        }
+        assert_no_more_writes(peer);
+    });
+    ime.focus_in(false);
+    assert!(ime.command_ready());
+    ime.sync(true);
+    ime.stop();
+    ime.sync(false);
+    assert!(!ime.command_ready());
+    ime.resume(true);
+    ime.sync(true);
+    assert!(!ime.command_ready());
+    ime.input(false);
+    assert!(ime.command_ready());
+    ime.focus_out();
+    ime.sync(false);
+    assert!(!ime.command_ready());
+    ime.input(true);
+    assert!(!ime.focused, "input must not override explicit focus loss");
+    ime.focus_in(true);
+    ime.quit();
+    assert!(ime.enabled);
+    service.join().unwrap();
+    Ok(())
+}
+
+#[test]
+fn hc_state_while_not_held_writes_nothing_and_acks_are_synthetic() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let transport = fixture.select_with(&fixture.path)?.unwrap();
+    let listener = fixture.listener.try_clone()?;
+    let service = thread::spawn(move || {
+        let mut peer = BufReader::new(listener.accept().unwrap().0);
+        label(&mut peer, Some("command"));
+        label(&mut peer, Some("idle"));
+        label(&mut peer, Some("text"));
+        label(&mut peer, None);
+        assert_no_more_writes(peer);
+    });
+    let mut connection = Connection::connect(&transport)?;
+    let recorded = Some(super::transport::AckScope::Recorded);
+    for request in [
+        &b"{\"op\":\"state\",\"state\":\"text\"}\n"[..],
+        b"{\"op\":\"enter\"}\n",
+        b"{\"op\":\"blur\"}\n",
+        b"{\"op\":\"state\",\"state\":\"command\"}\n",
+        b"{\"op\":\"resume\",\"state\":\"text\"}\n",
+        b"{\"op\":\"close\"}\n",
     ] {
-        let fixture = Fixture::new()?;
-        let mut ime = fixture.reporter(identity)?;
-        let listener = fixture.listener.try_clone()?;
-        let service = thread::spawn(move || {
-            let mut peer = BufReader::new(listener.accept().unwrap().0);
-            open(&mut peer, &params);
-            opened(&mut peer);
-            for (generation, (op, state)) in [
-                ("activate", Some("command")),
-                ("state", Some("text")),
-                ("suspend", None),
-                ("activate", Some("text")),
-                ("state", Some("command")),
-                ("blur", None),
-                ("activate", Some("text")),
-                ("close", None),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                receive(&mut peer, op, state);
-                acknowledge(&mut peer, generation as u64 + 1, "recorded");
-            }
-        });
-        ime.focus_in(false);
-        assert!(ime.command_ready());
-        ime.sync(true);
-        ime.stop();
-        ime.sync(false);
-        assert!(!ime.command_ready());
-        ime.resume(true);
-        ime.sync(true);
-        assert!(!ime.command_ready());
-        ime.input(false);
-        assert!(ime.command_ready());
-        ime.focus_out();
-        ime.sync(false);
-        assert!(!ime.command_ready());
-        ime.input(true);
-        assert!(!ime.focused, "input must not override explicit focus loss");
-        ime.focus_in(true);
-        ime.quit();
-        service.join().unwrap();
+        assert_eq!(connection.request(request).ok(), recorded);
     }
+    drop(connection);
+    service.join().unwrap();
     Ok(())
 }
 
@@ -440,24 +492,15 @@ fn herdr_pane_and_popup_streams_use_recorded_only_and_preserve_parent_handoff() 
 fn terminal_return_reports_own_current_mode_before_any_input() -> Result<()> {
     for editing in [false, true] {
         let fixture = Fixture::new()?;
-        let mut ime = fixture.reporter(("HERDR_PANE_ID", "pane-7"))?;
+        let mut ime = fixture.reporter()?;
         let listener = fixture.listener.try_clone()?;
         let service = thread::spawn(move || {
             let mut peer = BufReader::new(listener.accept().unwrap().0);
-            open(&mut peer, &json!({ "pane_id": "pane-7" }));
-            opened(&mut peer);
-            receive(&mut peer, "activate", Some("command"));
-            acknowledge(&mut peer, 1, "recorded");
-            receive(&mut peer, "suspend", None);
-            acknowledge(&mut peer, 2, "recorded");
-            receive(
-                &mut peer,
-                "activate",
-                Some(if editing { "text" } else { "command" }),
-            );
-            acknowledge(&mut peer, 3, "recorded");
-            receive(&mut peer, "close", None);
-            acknowledge(&mut peer, 4, "recorded");
+            label(&mut peer, Some("command"));
+            label(&mut peer, Some("idle"));
+            label(&mut peer, Some(if editing { "text" } else { "command" }));
+            label(&mut peer, None);
+            assert_no_more_writes(peer);
         });
         ime.focus_in(false);
         ime.stop();
@@ -502,21 +545,26 @@ fn inactive_terminal_return_cannot_authorize_or_replay_a_mode() -> Result<()> {
 }
 
 #[test]
-fn herdr_never_accepts_applied_scope_or_wrong_open_session_generation() -> Result<()> {
+fn invalid_hc_reply_disables_reporter() -> Result<()> {
+    let pgid = rustix::process::getpgrp().as_raw_nonzero().get();
+    let good = json!({ "imekit.intent": format!("1:{pgid}:command") });
     for reply in [
-        json!({ "ok": true, "generation": 2, "session": "test-lease", "scope": "applied" }),
-        json!({ "ok": true, "generation": 2, "session": "other", "scope": "recorded" }),
-        json!({ "ok": true, "generation": 0, "session": "test-lease", "scope": "recorded" }),
+        json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32602, "message": "no terminal" } }),
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "labels": good }, "error": null }),
+        json!({ "jsonrpc": "2.0", "id": 2, "result": { "labels": good } }),
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "labels": { "imekit.intent": "1:text" } } }),
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "labels": {} } }),
+        json!({ "jsonrpc": "2.0", "id": 1, "result": "ok" }),
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "labels": [] } }),
     ] {
         let fixture = Fixture::new()?;
-        let mut ime = fixture.reporter(("HERDR_PANE_ID", "pane-7"))?;
+        let mut ime = fixture.reporter()?;
         let listener = fixture.listener.try_clone()?;
         let service = thread::spawn(move || {
             let mut peer = BufReader::new(listener.accept().unwrap().0);
-            open(&mut peer, &json!({ "pane_id": "pane-7" }));
-            opened(&mut peer);
-            receive(&mut peer, "activate", Some("command"));
+            label_request(&mut peer, Some("command"));
             writeln!(peer.get_mut(), "{reply}").unwrap();
+            assert_no_more_writes(peer);
         });
         ime.focus_in(false);
         assert_disabled(&mut ime);
@@ -526,56 +574,19 @@ fn herdr_never_accepts_applied_scope_or_wrong_open_session_generation() -> Resul
 }
 
 #[test]
-fn malformed_open_is_refused_before_any_mode_can_be_recorded() -> Result<()> {
-    for reply in [
-        json!({ "id": "ime:open", "result": { "type": "pane_input_intent_stream_opened", "session": "test-lease", "generation": 1 }, "error": null }),
-        json!({ "id": "other", "result": { "type": "pane_input_intent_stream_opened", "session": "test-lease", "generation": 1 } }),
-        json!({ "id": "ime:open", "result": { "type": "other", "session": "test-lease", "generation": 1 } }),
-        json!({ "id": "ime:open", "result": { "type": "pane_input_intent_stream_opened", "session": "", "generation": 1 } }),
-        json!({ "id": "ime:open", "result": { "type": "pane_input_intent_stream_opened", "session": "test-lease", "generation": 0 } }),
-        json!({ "id": "ime:open", "result": { "type": "pane_input_intent_stream_opened", "session": "test-lease", "generation": true } }),
-        json!({ "id": "ime:open", "error": { "code": "TARGET_NOT_FOUND", "message": "No target" } }),
-    ] {
-        let fixture = Fixture::new()?;
-        let mut ime = fixture.reporter(("HERDR_PANE_ID", "pane-7"))?;
-        let listener = fixture.listener.try_clone()?;
-        let service = thread::spawn(move || {
-            let mut peer = BufReader::new(listener.accept().unwrap().0);
-            open(&mut peer, &json!({ "pane_id": "pane-7" }));
-            writeln!(peer.get_mut(), "{reply}").unwrap();
-            let mut unexpected = String::new();
-            assert_eq!(peer.read_line(&mut unexpected).unwrap(), 0);
-        });
-        ime.focus_in(false);
-        assert_disabled(&mut ime);
-        service.join().unwrap();
-    }
-    Ok(())
-}
-
-#[test]
-fn invalid_marker_or_identity_never_falls_back_to_the_host_daemon() -> Result<()> {
+fn partial_hc_env_never_falls_back_to_the_host_daemon() -> Result<()> {
     for values in [
-        vec![("HERDR_IME_INTENT", "unsupported")],
-        vec![("HERDR_IME_INTENT", "")],
-        vec![("HERDR_IME_INTENT", "1")],
-        vec![("HERDR_IME_INTENT", "1"), ("HERDR_ENV", "1")],
+        vec![("HC_TERMINAL_ID", "t")],
+        vec![("HC_TERMINAL_SOCKET", "/tmp/s")],
+        vec![("HC_TERMINAL_ID", ""), ("HC_TERMINAL_SOCKET", "/tmp/s")],
+        vec![("HC_TERMINAL_ID", "t"), ("HC_TERMINAL_SOCKET", "")],
         vec![
-            ("HERDR_IME_INTENT", "1"),
-            ("HERDR_ENV", "1"),
-            ("HERDR_PANE_ID", "p"),
-            ("HERDR_IME_POPUP_TERMINAL_ID", "t"),
+            ("HC_TERMINAL_ID", "t"),
+            ("HC_TERMINAL_SOCKET", "tcp://host:123"),
         ],
         vec![
-            ("HERDR_IME_INTENT", "1"),
-            ("HERDR_ENV", "1"),
-            ("HERDR_PANE_ID", "p"),
-        ],
-        vec![
-            ("HERDR_IME_INTENT", "1"),
-            ("HERDR_ENV", "1"),
-            ("HERDR_PANE_ID", "p"),
-            ("HERDR_SOCKET_PATH", "tcp://host:123"),
+            ("HC_TERMINAL_ID", "t"),
+            ("HC_TERMINAL_SOCKET", "/tmp/../tmp/s"),
         ],
     ] {
         assert!(
@@ -584,7 +595,7 @@ fn invalid_marker_or_identity_never_falls_back_to_the_host_daemon() -> Result<()
                     .iter()
                     .find(|(name, _)| *name == key)
                     .map(|(_, value)| OsString::from(value)),
-                || panic!("invalid marker must never reach ordinary local eligibility")
+                || panic!("invalid hc env must never reach direct eligibility")
             )
             .is_err()
         );
@@ -594,36 +605,27 @@ fn invalid_marker_or_identity_never_falls_back_to_the_host_daemon() -> Result<()
 }
 
 #[test]
-fn herdr_refuses_nonprivate_socket_or_ancestor_and_symlink_traversal() -> Result<()> {
+fn hc_refuses_shared_parent_foreign_target_and_symlink_traversal() -> Result<()> {
     let fixture = Fixture::new()?;
-    fs::set_permissions(&fixture.path, fs::Permissions::from_mode(0o660))?;
-    assert!(fixture.select(("HERDR_PANE_ID", "p")).is_err());
-    fs::set_permissions(&fixture.path, fs::Permissions::from_mode(0o600))?;
+    fixture.listener.set_nonblocking(true)?;
     fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o755))?;
-    assert!(fixture.select(("HERDR_PANE_ID", "p")).is_err());
+    assert!(fixture.select_with(&fixture.path).is_err());
     fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700))?;
     let alias = fixture.root.join("alias");
     symlink(&fixture.path, &alias)?;
-    let values = [
-        ("HERDR_IME_INTENT", "1"),
-        ("HERDR_ENV", "1"),
-        ("HERDR_PANE_ID", "p"),
-    ];
-    assert!(
-        Transport::select(
-            |key| {
-                if key == "HERDR_SOCKET_PATH" {
-                    Some(alias.clone().into_os_string())
-                } else {
-                    values
-                        .iter()
-                        .find(|(name, _)| *name == key)
-                        .map(|(_, value)| OsString::from(value))
-                }
-            },
-            || panic!("Herdr cannot fall back after unsafe socket refusal")
-        )
-        .is_err()
+    assert!(fixture.select_with(&alias).is_err());
+    let plain = fixture.root.join("plain");
+    fs::write(&plain, b"")?;
+    assert!(fixture.select_with(&plain).is_err());
+    // Even once selected, a parent made unsafe before connect refuses the socket.
+    let mut ime = fixture.reporter()?;
+    fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o750))?;
+    ime.focus_in(false);
+    fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700))?;
+    assert_disabled(&mut ime);
+    assert_eq!(
+        fixture.listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
     Ok(())
 }

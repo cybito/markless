@@ -1,5 +1,5 @@
 //! Reports Markless's text/command mode through one optional persistent intent connection.
-//! Source ownership and readback belong to ime-control, never to Markless or a Herdr server.
+//! Source ownership and readback belong to ime-control, never to Markless or the Herdr terminal server.
 
 #[cfg(unix)]
 use std::{env, io::IsTerminal};
@@ -38,7 +38,7 @@ impl Ime {
             "ime.transport",
             match &transport {
                 Some(Transport::Direct(_)) => "direct",
-                Some(Transport::Herdr { .. }) => "herdr",
+                Some(Transport::Hc { .. }) => "hc",
                 None => "disabled (ineligible session or invalid configuration)",
             },
         );
@@ -171,7 +171,7 @@ impl Ime {
             return self.focus_in(editing);
         }
         #[cfg(unix)]
-        if !matches!(self.transport.as_ref(), Some(Transport::Herdr { .. })) {
+        if !matches!(self.transport.as_ref(), Some(Transport::Hc { .. })) {
             // Only genuine input may resume a direct owner without a TUI focus event.
             return self.resume_intent(editing);
         }
@@ -186,7 +186,7 @@ impl Ime {
     }
 
     /// Disabled means ordinary CLI dispatch, not an applied IME guarantee.
-    /// Direct protection requires applied; Herdr recorded only authorizes reporting.
+    /// Direct protection requires applied; hc recorded only authorizes reporting.
     pub fn command_ready(&self) -> bool {
         !self.enabled || (self.running && self.focused && self.state == Some(false))
     }
